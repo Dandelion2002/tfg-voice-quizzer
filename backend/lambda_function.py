@@ -195,7 +195,9 @@ def _handle_intent(event):
         return _numero(attrs, {'numero': {'value': val}})
 
     if estado == 'eligiendo_tipo':
-        return _tipo(attrs, {'tipo': {'value': val}})
+        # Pasamos los slots originales del evento para que _tipo
+        # pueda escanear TODOS los slots y usar el nombre del intent
+        return _tipo(attrs, slots, intent_name=name)
 
     if estado == 'repasando':
         # "no", "para", "finalizar" → parar el repaso
@@ -394,22 +396,46 @@ def _numero(attrs, slots):
     return _resp("No entendí. Repite el número.", attrs=attrs)
 
 
-def _tipo(attrs, slots):
-    val = (slots.get('tipo') or {}).get('value', '').lower().strip()
+def _tipo(attrs, slots, intent_name=''):
+    """Detecta si el usuario quiere repasar o hacer un cuestionario.
 
-    # Normalizar tildes para facilitar la comparación
-    val = (val.replace('á', 'a').replace('é', 'e').replace('í', 'i')
-              .replace('ó', 'o').replace('ú', 'u'))
+    Estrategia en capas para ser lo más resiliente posible:
+    1. Recopilar texto de TODOS los slots disponibles.
+    2. Usar también el nombre del intent como pista.
+    3. Buscar palabras clave en el texto combinado.
+    """
+    def _norm(t):
+        return (str(t).lower()
+                .replace('á','a').replace('é','e').replace('í','i')
+                .replace('ó','o').replace('ú','u').replace('ñ','n'))
 
-    if any(x in val for x in ['repas', 'resum', 'temario']):
+    # --- Recopilar texto de todos los slots ---
+    fragmentos = []
+    for slot_obj in (slots or {}).values():
+        sv = (slot_obj or {}).get('value', '') or ''
+        if sv.strip():
+            fragmentos.append(_norm(sv.strip()))
+
+    texto = ' '.join(fragmentos)
+
+    # --- El nombre del intent también puede darnos una pista ---
+    intent_norm = _norm(intent_name)
+
+    print(f"[TIPO DEBUG] texto_slots={repr(texto)} intent={intent_name}")
+
+    # --- Detectar "repasar" ---
+    palabras_repaso = ['repas', 'resum', 'temario']
+    if any(p in texto for p in palabras_repaso) or any(p in intent_norm for p in palabras_repaso):
         return _generar_repaso(attrs)
 
-    if any(x in val for x in ['cuestion', 'test', 'examen', 'preguntas']):
+    # --- Detectar "cuestionario / test" ---
+    palabras_test = ['cuestion', 'test', 'examen', 'preguntas', 'quiz']
+    if any(p in texto for p in palabras_test) or any(p in intent_norm for p in palabras_test):
         attrs.update({'tipo': 'test', 'estado': 'eligiendo_num_preguntas'})
         return _resp("Cuestionario. ¿Cuántas preguntas quieres? Entre 1 y 20.", attrs=attrs)
 
     return _resp(
-        "Di 'repasar' para escuchar un resumen del temario, "
+        "No te he entendido. Di 'repasar' para escuchar un resumen del temario, "
         "o 'cuestionario' para hacer un test.",
         attrs=attrs
     )
