@@ -9,6 +9,7 @@ import Logo from './Logo';
 interface HomeProps {
   email: string;
   pin: string;
+  fotoKey?: string;
   onSelectAsignatura: (asignatura: Asignatura) => void;
   onGoToHistory: () => void;
   onViewUser: () => void;

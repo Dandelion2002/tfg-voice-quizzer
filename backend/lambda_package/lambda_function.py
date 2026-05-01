@@ -1,11 +1,10 @@
 """
 Voice Quizzer — Alexa Skill Lambda Handler
 ==========================================
-Sin dependencias externas: usa urllib (built-in) para llamar a Groq API
-y boto3 (built-in en Lambda) para DynamoDB y S3.
+Sin dependencias externas: usa boto3 (built-in en Lambda) para DynamoDB, S3 y Bedrock.
 
 Variables de entorno requeridas:
-  GROQ_API_KEY, AWS_BUCKET_NAME, AWS_REGION_NAME
+  AWS_BUCKET_NAME, AWS_REGION_NAME
 """
 
 import os
@@ -33,14 +32,49 @@ tabla_historial = dynamodb.Table('VQ_Historial')
 _chunks_cache: dict = {}
 
 
-# ── Groq API (urllib, sin librerías externas) ─────────────────────────────────
+# ── Extractor de JSON robusto ─────────────────────────────────────────────────
+
+def _extraer_json(texto, array=True):
+    """Extrae JSON del texto del LLM manejando múltiples arrays, markdown y texto extra."""
+    import re
+    texto = re.sub(r'```(?:json)?', '', texto).strip()
+
+    if array:
+        objetos = []
+        depth   = 0
+        start   = None
+        for i, c in enumerate(texto):
+            if c == '{':
+                if depth == 0:
+                    start = i
+                depth += 1
+            elif c == '}':
+                depth -= 1
+                if depth == 0 and start is not None:
+                    objetos.append(texto[start:i + 1])
+                    start = None
+        if objetos:
+            return '[' + ','.join(objetos) + ']'
+        inicio = texto.find('[')
+        fin    = texto.rfind(']')
+        if inicio != -1 and fin != -1 and fin > inicio:
+            return texto[inicio:fin + 1]
+    else:
+        inicio = texto.find('{')
+        fin    = texto.rfind('}')
+        if inicio != -1 and fin != -1 and fin > inicio:
+            return texto[inicio:fin + 1]
+
+    return texto.strip()
+
+
+# ── Bedrock (Claude 3 Haiku) ──────────────────────────────────────────────────
 
 def _groq(messages, temperature=0.4, max_tokens=4000):
-    """Llama a AWS Bedrock (Llama 3) usando boto3 — sin bloqueos, dentro de AWS."""
+    """Llama a AWS Bedrock (Claude 3 Haiku) usando boto3."""
 
     bedrock = boto3.client('bedrock-runtime', region_name='eu-west-1')
 
-    # Convertir formato OpenAI → formato Bedrock Converse API
     system_content = []
     conv_messages  = []
     for m in messages:
@@ -52,14 +86,13 @@ def _groq(messages, temperature=0.4, max_tokens=4000):
                 'content': [{'text': m['content']}],
             })
 
-    # Si no hay mensajes de usuario, añadir uno vacío para evitar error
     if not conv_messages:
         conv_messages = [{'role': 'user', 'content': [{'text': 'Hola'}]}]
 
     kwargs = {
-        'modelId':           'meta.llama3-8b-instruct-v1:0',
-        'messages':          conv_messages,
-        'inferenceConfig':   {
+        'modelId':         'anthropic.claude-3-haiku-20240307-v1:0',
+        'messages':        conv_messages,
+        'inferenceConfig': {
             'maxTokens':   max_tokens,
             'temperature': temperature,
         },
@@ -68,8 +101,8 @@ def _groq(messages, temperature=0.4, max_tokens=4000):
         kwargs['system'] = system_content
 
     try:
-        resp   = bedrock.converse(**kwargs)
-        texto  = resp['output']['message']['content'][0]['text']
+        resp  = bedrock.converse(**kwargs)
+        texto = resp['output']['message']['content'][0]['text']
         print(f"[BEDROCK DEBUG] Respuesta recibida, longitud: {len(texto)}")
         return texto.strip()
     except Exception as e:
@@ -138,19 +171,18 @@ def _handle_intent(event):
     attrs  = event.get('session', {}).get('attributes', {}) or {}
     estado = attrs.get('estado', '')
 
-    # Stop/Cancel siempre funcionan independientemente del estado
-    if name in ('AMAZON.StopIntent', 'AMAZON.CancelIntent'):
-        return _resp("Hasta luego.", end=True)
-
     val = _primer_slot(slots)
 
+    # Stop/Cancel — si estamos repasando, guardamos el resumen parcial antes de salir
+    if name in ('AMAZON.StopIntent', 'AMAZON.CancelIntent'):
+        if estado == 'repasando':
+            return _finalizar_repaso(attrs, cerrar=True)
+        return _resp("Hasta luego.", end=True)
+
     # ── Routing por estado (tiene prioridad sobre el nombre del intent) ────────
-    # Así evitamos que Alexa enrute erróneamente el PIN o las respuestas
-    # a intents equivocados (FinalizarIntent, ResponderIntent, etc.)
 
     if estado == 'esperando_pin':
         if not val:
-            # Alexa no capturó ningún número — pedir que lo repita
             return _resp(
                 "No escuché tu código correctamente. "
                 "Di 'mi código es' seguido de los seis dígitos, por ejemplo: "
@@ -165,17 +197,38 @@ def _handle_intent(event):
     if estado == 'eligiendo_tipo':
         return _tipo(attrs, {'tipo': {'value': val}})
 
-    if estado == 'eligiendo_modo':
-        return _modo(attrs, {'modo': {'value': val}})
+    if estado == 'repasando':
+        # "no", "para", "finalizar" → parar el repaso
+        if name in ('AMAZON.NoIntent', 'FinalizarIntent'):
+            return _finalizar_repaso(attrs, cerrar=True)
+        # Cualquier otra cosa (sí, continúa, etc.) → siguiente segmento
+        return _siguiente_segmento(attrs)
 
     if estado == 'en_cuestionario':
-        if name == 'FinalizarIntent':
-            return _finalizar(attrs)
+        print(f"[QUIZ DEBUG] intent={name} val={repr(val)} slots={json.dumps(slots)}")
         if name == 'AMAZON.YesIntent':
             return _yes(attrs)
         if name == 'AMAZON.NoIntent':
             return _no(attrs)
-        return _evaluar_respuesta(attrs, val)
+
+        # Recoger el valor de cualquier slot que tenga contenido
+        respuesta = val
+        if not respuesta:
+            for slot_obj in slots.values():
+                sv = (slot_obj or {}).get('value', '') or ''
+                if sv.strip():
+                    respuesta = sv.strip()
+                    break
+
+        if not respuesta:
+            try:
+                respuesta = event['request'].get('intent', {}).get('slots', {}).get('respuesta', {}).get('value', '') or ''
+            except Exception:
+                pass
+
+        if respuesta:
+            return _evaluar_respuesta(attrs, respuesta)
+        return _resp("No entendí. Di opción A, opción B u opción C.", attrs=attrs)
 
     if estado == 'preguntando_continuar':
         if name == 'AMAZON.YesIntent':
@@ -202,7 +255,6 @@ def _handle_intent(event):
         'VincularCuentaIntent':    lambda: _vincular(event, attrs, slots),
         'SeleccionarNumeroIntent': lambda: _numero(attrs, slots),
         'SeleccionarTipoIntent':   lambda: _tipo(attrs, slots),
-        'SeleccionarModoIntent':   lambda: _modo(attrs, slots),
         'ResponderIntent':         lambda: _evaluar(attrs, slots),
     }
     fn = dispatch.get(name)
@@ -228,16 +280,13 @@ _NUMEROS_ES = {
 }
 
 def _extraer_numero(texto):
-    """Intenta extraer un número de un texto en español.
-    Primero prueba conversión directa, luego busca palabras numéricas."""
+    """Intenta extraer un número de un texto en español."""
     if not texto:
         return None
-    # Intentar conversión directa (Alexa ya lo convirtió a dígito)
     try:
         return int(float(str(texto).strip()))
     except (ValueError, TypeError):
         pass
-    # Buscar palabras numéricas en el texto
     texto_lower = str(texto).lower().strip()
     for palabra, valor in _NUMEROS_ES.items():
         if palabra in texto_lower:
@@ -298,7 +347,7 @@ def _numero(attrs, slots):
 
     num = _extraer_numero(val)
     if num is None:
-        return _resp("No entendí el número. Repite por favor.", attrs=attrs)
+        return _resp("No te he entendido. Tienes que decir, por ejemplo: quiero cinco, o quiero tres. Repite por favor.", attrs=attrs)
 
     if estado == 'eligiendo_asignatura':
         lista = attrs.get('asignaturas', [])
@@ -332,7 +381,7 @@ def _numero(attrs, slots):
         unidad = lista[num - 1]
         attrs.update({'estado': 'eligiendo_tipo', 'unidad': unidad})
         return _resp(
-            f"Has elegido {unidad}. ¿Quieres hacer un test o un cuestionario de desarrollo?",
+            f"Has elegido {unidad}. ¿Quieres repasar el temario o hacer un cuestionario?",
             attrs=attrs
         )
 
@@ -346,34 +395,24 @@ def _numero(attrs, slots):
 
 
 def _tipo(attrs, slots):
-    val = (slots.get('tipo') or {}).get('value', '').lower()
+    val = (slots.get('tipo') or {}).get('value', '').lower().strip()
 
-    if 'test' in val:
+    # Normalizar tildes para facilitar la comparación
+    val = (val.replace('á', 'a').replace('é', 'e').replace('í', 'i')
+              .replace('ó', 'o').replace('ú', 'u'))
+
+    if any(x in val for x in ['repas', 'resum', 'temario']):
+        return _generar_repaso(attrs)
+
+    if any(x in val for x in ['cuestion', 'test', 'examen', 'preguntas']):
         attrs.update({'tipo': 'test', 'estado': 'eligiendo_num_preguntas'})
-        return _resp("Modo test. ¿Cuántas preguntas quieres? Entre 1 y 20.", attrs=attrs)
+        return _resp("Cuestionario. ¿Cuántas preguntas quieres? Entre 1 y 20.", attrs=attrs)
 
-    elif 'desarrollo' in val or 'abierta' in val:
-        attrs.update({'tipo': 'desarrollo', 'estado': 'eligiendo_modo'})
-        return _resp(
-            "Modo desarrollo. ¿Quieres modo fácil o modo difícil? "
-            "En el fácil recibirás una pequeña pista tras cada pregunta.",
-            attrs=attrs
-        )
-
-    return _resp("Di 'test' o 'desarrollo'.", attrs=attrs)
-
-
-def _modo(attrs, slots):
-    val = (slots.get('modo') or {}).get('value', '').lower()
-
-    if any(x in val for x in ['facil', 'fácil', 'sencillo', 'easy']):
-        attrs.update({'modo': 'facil', 'estado': 'eligiendo_num_preguntas'})
-    elif any(x in val for x in ['dificil', 'difícil', 'hard', 'complicado']):
-        attrs.update({'modo': 'dificil', 'estado': 'eligiendo_num_preguntas'})
-    else:
-        return _resp("Di 'fácil' o 'difícil'.", attrs=attrs)
-
-    return _resp("¿Cuántas preguntas quieres? Entre 1 y 20.", attrs=attrs)
+    return _resp(
+        "Di 'repasar' para escuchar un resumen del temario, "
+        "o 'cuestionario' para hacer un test.",
+        attrs=attrs
+    )
 
 
 def _evaluar(attrs, slots):
@@ -393,7 +432,6 @@ def _yes(attrs):
         return _resp("De acuerdo. Tu progreso no se ha guardado. ¡Hasta pronto!", end=True)
 
     if attrs.get('estado') == 'preguntando_continuar':
-        # El usuario quiere estudiar otra cosa → volver a elegir asignatura
         email       = attrs['email']
         nombre      = attrs['nombre']
         asignaturas = _get_asignaturas(email)
@@ -417,12 +455,11 @@ def _no(attrs):
         idx   = attrs.get('pregunta_actual', 0)
         preg  = attrs['preguntas'][idx]
         total = len(attrs['preguntas'])
-        msg   = f"Continuamos. Pregunta {idx + 1} de {total}: {preg['pregunta']}. "
-        if attrs.get('tipo') == 'test':
-            o = preg['opciones']
-            msg += f"A: {o['A']}. B: {o['B']}. C: {o['C']}."
-        elif attrs.get('modo') == 'facil' and preg.get('pista'):
-            msg += f"Pista: {preg['pista']}."
+        o     = preg['opciones']
+        msg   = (
+            f"Continuamos. Pregunta {idx + 1} de {total}: {preg['pregunta']}. "
+            f"Opción A: {o['A']}. Opción B: {o['B']}. Opción C: {o['C']}."
+        )
         return _resp(msg, attrs=attrs)
 
     if attrs.get('estado') == 'preguntando_continuar':
@@ -435,17 +472,212 @@ def _no(attrs):
     return _evaluar_respuesta(attrs, 'no')
 
 
-# ── Lógica del cuestionario ───────────────────────────────────────────────────
+# ── Repaso ────────────────────────────────────────────────────────────────────
+
+def _segmentar(texto, max_chars=500):
+    """Divide el texto en segmentos de ~max_chars caracteres cortando en párrafos."""
+    parrafos = [p.strip() for p in texto.replace('\r\n', '\n').split('\n\n') if p.strip()]
+    if not parrafos:
+        parrafos = [texto.strip()]
+
+    segmentos = []
+    actual    = ''
+
+    for parrafo in parrafos:
+        if not actual:
+            actual = parrafo
+        elif len(actual) + len(parrafo) + 1 <= max_chars:
+            actual += ' ' + parrafo
+        else:
+            segmentos.append(actual)
+            actual = parrafo
+
+    if actual:
+        segmentos.append(actual)
+
+    # Si algún segmento es demasiado largo, cortarlo por frases
+    resultado = []
+    for seg in segmentos:
+        if len(seg) <= max_chars:
+            resultado.append(seg)
+        else:
+            frases = seg.split('. ')
+            grupo  = ''
+            for frase in frases:
+                if not grupo:
+                    grupo = frase
+                elif len(grupo) + len(frase) + 2 <= max_chars:
+                    grupo += '. ' + frase
+                else:
+                    resultado.append(grupo if grupo.endswith('.') else grupo + '.')
+                    grupo = frase
+            if grupo:
+                resultado.append(grupo if grupo.endswith('.') else grupo + '.')
+
+    return resultado if resultado else [texto[:max_chars]]
+
+
+def _generar_repaso(attrs):
+    """Genera un resumen del temario con Claude y empieza a recitarlo por segmentos."""
+    email      = attrs['email']
+    asignatura = attrs['asignatura']
+    unidad     = attrs['unidad']
+
+    cache_key = f"{email}/{asignatura}/{unidad}"
+    if cache_key not in _chunks_cache:
+        s3_key = f"{email}/{asignatura}/{unidad}/index/chunks.json"
+        try:
+            obj    = s3.get_object(Bucket=BUCKET, Key=s3_key)
+            chunks = json.loads(obj['Body'].read().decode('utf-8'))
+            _chunks_cache[cache_key] = '\n\n'.join(chunks[:25])
+        except Exception as exc:
+            print(f"Error cargando chunks para repaso: {exc}")
+            return _resp(
+                "No pude cargar el contenido de esta unidad. "
+                "Asegúrate de que su estado es 'listo' en la app web.",
+                end=True
+            )
+
+    contexto = _chunks_cache[cache_key]
+
+    prompt = (
+        "Eres un profesor universitario. Resume el siguiente contenido educativo "
+        "en aproximadamente un 35% de su extensión original, en español claro y bien estructurado. "
+        "El resumen debe cubrir todos los conceptos importantes del temario. "
+        "Escribe párrafos breves separados por una línea en blanco. "
+        "NO incluyas títulos, numeraciones, viñetas ni texto introductorio. "
+        "ESCRIBE ÚNICAMENTE el resumen.\n\n"
+        f"Contenido:\n{contexto}"
+    )
+
+    try:
+        resumen = _groq([{'role': 'user', 'content': prompt}], temperature=0.3, max_tokens=3000)
+        print(f"[REPASO DEBUG] Resumen generado, longitud: {len(resumen)}")
+    except Exception as exc:
+        print(f"Error generando resumen: {exc}")
+        return _resp("Hubo un error generando el resumen. Inténtalo de nuevo.", end=True)
+
+    segmentos = _segmentar(resumen)
+    total     = len(segmentos)
+    print(f"[REPASO DEBUG] Segmentos: {total}")
+
+    # Si solo hay un segmento, lo leemos, guardamos y pasamos a preguntando_continuar
+    if total == 1:
+        _guardar_resumen(email, asignatura, unidad, resumen)
+        attrs.update({
+            'estado':          'preguntando_continuar',
+            'segmentos':       [],
+            'segmento_actual': 0,
+        })
+        return _resp(
+            f"Repaso de {unidad}: {segmentos[0]} "
+            "¡Eso es todo el repaso! ¿Quieres estudiar otra cosa?",
+            attrs=attrs
+        )
+
+    attrs.update({
+        'estado':          'repasando',
+        'segmentos':       segmentos,
+        'segmento_actual': 0,
+    })
+
+    return _resp(
+        f"Empezamos el repaso de {unidad}. Parte 1 de {total}. "
+        f"{segmentos[0]} ¿Continúo?",
+        attrs=attrs
+    )
+
+
+def _siguiente_segmento(attrs):
+    """Avanza al siguiente segmento del repaso."""
+    segmentos = attrs.get('segmentos', [])
+    idx       = attrs.get('segmento_actual', 0) + 1
+    total     = len(segmentos)
+
+    if idx >= total:
+        # Seguridad: todos los segmentos ya leídos
+        _guardar_resumen(
+            attrs.get('email', ''), attrs.get('asignatura', ''),
+            attrs.get('unidad', ''), '\n\n'.join(segmentos)
+        )
+        attrs.update({'estado': 'preguntando_continuar', 'segmentos': [], 'segmento_actual': 0})
+        attrs.pop('asignatura', None)
+        attrs.pop('unidad', None)
+        return _resp("¡Repaso completado! ¿Quieres estudiar otra cosa?", attrs=attrs)
+
+    attrs['segmento_actual'] = idx
+    seg = segmentos[idx]
+
+    # ¿Es el último segmento?
+    if idx + 1 >= total:
+        _guardar_resumen(
+            attrs.get('email', ''), attrs.get('asignatura', ''),
+            attrs.get('unidad', ''), '\n\n'.join(segmentos)
+        )
+        attrs.update({'estado': 'preguntando_continuar', 'segmentos': [], 'segmento_actual': 0})
+        attrs.pop('asignatura', None)
+        attrs.pop('unidad', None)
+        return _resp(
+            f"Parte {idx + 1} de {total}. {seg} "
+            "¡Eso es todo el repaso! ¿Quieres estudiar otra cosa?",
+            attrs=attrs
+        )
+
+    return _resp(f"Parte {idx + 1} de {total}. {seg} ¿Continúo?", attrs=attrs)
+
+
+def _finalizar_repaso(attrs, cerrar=False):
+    """Guarda el resumen parcial/completo y termina el repaso."""
+    segmentos = attrs.get('segmentos', [])
+    if segmentos:
+        _guardar_resumen(
+            attrs.get('email', ''),
+            attrs.get('asignatura', ''),
+            attrs.get('unidad', ''),
+            '\n\n'.join(segmentos)
+        )
+
+    if cerrar:
+        return _resp(
+            "De acuerdo, paramos el repaso. El resumen ha sido guardado. ¡Hasta pronto!",
+            end=True
+        )
+
+    # Completado sin cerrar sesión
+    attrs.update({'estado': 'preguntando_continuar', 'segmentos': [], 'segmento_actual': 0})
+    attrs.pop('asignatura', None)
+    attrs.pop('unidad', None)
+    return _resp("¡Repaso completado! ¿Quieres estudiar otra cosa?", attrs=attrs)
+
+
+def _guardar_resumen(email, asignatura, unidad, resumen):
+    """Guarda el resumen en el campo 'resumen' de VQ_Unidad."""
+    if not email or not asignatura or not unidad or not resumen:
+        return
+    try:
+        id_unidad       = f"{email}#{asignatura}#{unidad}"
+        detalle_archivo = f"{asignatura}#{unidad}"
+        tabla_unidades.update_item(
+            Key={
+                'id_unidad':       id_unidad,
+                'detalle_archivo': detalle_archivo,
+            },
+            UpdateExpression='SET resumen = :r',
+            ExpressionAttributeValues={':r': resumen},
+        )
+        print(f"[REPASO DEBUG] Resumen guardado para '{unidad}'")
+    except Exception as e:
+        print(f"_guardar_resumen error: {e}")
+
+
+# ── Lógica del cuestionario (solo test) ──────────────────────────────────────
 
 def _generar_cuestionario(attrs):
     email      = attrs['email']
     asignatura = attrs['asignatura']
     unidad     = attrs['unidad']
-    tipo       = attrs['tipo']
-    modo       = attrs.get('modo', 'normal')
     n          = attrs['num_preguntas']
 
-    # Cargar chunks desde S3 (con caché en /tmp)
     cache_key = f"{email}/{asignatura}/{unidad}"
     if cache_key not in _chunks_cache:
         s3_key = f"{email}/{asignatura}/{unidad}/index/chunks.json"
@@ -464,36 +696,21 @@ def _generar_cuestionario(attrs):
 
     contexto = _chunks_cache[cache_key]
 
-    if tipo == 'test':
-        prompt = (
-            f"Eres un profesor. Genera exactamente {n} preguntas de tipo test en español, "
-            f"basándote SOLO en este contenido:\n\n{contexto}\n\n"
-            "Cada pregunta tiene EXACTAMENTE 3 opciones: A, B y C. "
-            "RESPONDE ÚNICAMENTE CON JSON VÁLIDO, sin texto adicional, sin markdown:\n"
-            '[{"pregunta":"¿...?","opciones":{"A":"...","B":"...","C":"..."},'
-            '"correcta":"A","explicacion":"La respuesta es A porque..."}]'
-        )
-    else:
-        pista_str = (
-            'Incluye una pista breve (máximo 15 palabras) en el campo "pista".'
-            if modo == 'facil'
-            else 'El campo "pista" déjalo en cadena vacía "".'
-        )
-        prompt = (
-            f"Eres un profesor. Genera exactamente {n} preguntas de desarrollo en español, "
-            f"basándote SOLO en este contenido:\n\n{contexto}\n\n{pista_str}\n\n"
-            "RESPONDE ÚNICAMENTE CON JSON VÁLIDO, sin texto adicional, sin markdown:\n"
-            '[{"pregunta":"Explica...","respuesta_modelo":"La respuesta es...","palabras_clave":["p1","p2"],"pista":"..."}]'
-        )
+    prompt = (
+        f"Eres un profesor. Genera exactamente {n} preguntas de tipo test DIFERENTES entre sí en español, "
+        f"basándote SOLO en este contenido:\n\n{contexto}\n\n"
+        f"IMPORTANTE: Las {n} preguntas deben tratar aspectos o conceptos DISTINTOS del contenido. "
+        "Cada pregunta tiene EXACTAMENTE 3 opciones: A, B y C. Solo una es correcta. "
+        "RESPONDE ÚNICAMENTE CON UN ARRAY JSON VÁLIDO y nada más, sin texto adicional, sin markdown:\n"
+        '[{"pregunta":"¿...?","opciones":{"A":"...","B":"...","C":"..."},'
+        '"correcta":"A","explicacion":"La respuesta es A porque..."}]'
+    )
 
     try:
         raw = _groq([{'role': 'user', 'content': prompt}], temperature=0.4, max_tokens=4000)
-        if '```' in raw:
-            raw = raw.split('```')[1]
-            if raw.startswith('json'):
-                raw = raw[4:]
-            raw = raw.strip()
-        preguntas = json.loads(raw)
+        print(f"[RAW LLM] >>>{raw[:800]}<<<")
+        extraido  = _extraer_json(raw, array=True)
+        preguntas = json.loads(extraido)
     except Exception as exc:
         print(f"Error generando preguntas: {exc}")
         return _resp("Hubo un error generando las preguntas. Inténtalo de nuevo.", end=True)
@@ -504,18 +721,19 @@ def _generar_cuestionario(attrs):
 
     attrs.update({
         'estado':          'en_cuestionario',
+        'tipo':            'test',
         'preguntas':       preguntas,
         'pregunta_actual': 0,
         'aciertos':        0,
     })
 
     primera = preguntas[0]
-    msg = f"Perfecto. Empezamos. Pregunta 1 de {n}: {primera['pregunta']} "
-    if tipo == 'test':
-        o = primera['opciones']
-        msg += f"A: {o['A']}. B: {o['B']}. C: {o['C']}."
-    elif modo == 'facil' and primera.get('pista'):
-        msg += f"Pista: {primera['pista']}."
+    o       = primera['opciones']
+    msg = (
+        f"Perfecto. Para responder di 'opción A', 'opción B' u 'opción C'. "
+        f"Pregunta 1 de {n}: {primera['pregunta']} "
+        f"Opción A: {o['A']}. Opción B: {o['B']}. Opción C: {o['C']}."
+    )
 
     return _resp(msg, attrs=attrs)
 
@@ -526,48 +744,39 @@ def _evaluar_respuesta(attrs, respuesta_val):
 
     preguntas = attrs.get('preguntas', [])
     idx       = attrs.get('pregunta_actual', 0)
-    tipo      = attrs.get('tipo', 'test')
     aciertos  = attrs.get('aciertos', 0)
     pregunta  = preguntas[idx]
 
-    if tipo == 'test':
-        letra    = str(respuesta_val).strip().upper()[:1]
-        correcta = pregunta['correcta'].upper()
-        if letra == correcta:
-            aciertos += 1
-            feedback = f"¡Correcto! {pregunta.get('explicacion', '')}"
-        else:
-            feedback = (
-                f"Incorrecto. La respuesta correcta era {correcta}: "
-                f"{pregunta['opciones'].get(correcta, '')}. "
-                f"{pregunta.get('explicacion', '')}"
-            )
+    import re as _re
+    raw_resp = str(respuesta_val).strip().lower()
+    raw_norm = (raw_resp
+                .replace('ó', 'o').replace('á', 'a').replace('é', 'e')
+                .replace('í', 'i').replace('ú', 'u'))
+    letra = ''
+    m = _re.search(r'opci[oa]n\s*([abc])', raw_norm)
+    if m:
+        letra = m.group(1).upper()
     else:
-        eval_prompt = (
-            "Evalúa si la respuesta del alumno es correcta. Responde SOLO con JSON.\n\n"
-            f"Pregunta: {pregunta['pregunta']}\n"
-            f"Respuesta modelo: {pregunta['respuesta_modelo']}\n"
-            f"Palabras clave: {', '.join(pregunta.get('palabras_clave', []))}\n"
-            f"Respuesta del alumno: {respuesta_val}\n\n"
-            'JSON: {"correcto": true, "explicacion": "máximo 25 palabras"}'
+        m = _re.search(r'\b([abc])\b', raw_norm)
+        if m:
+            letra = m.group(1).upper()
+        else:
+            for ch in raw_norm:
+                if ch in ('a', 'b', 'c'):
+                    letra = ch.upper()
+                    break
+
+    print(f"[TEST DEBUG] raw={repr(raw_resp)} letra={letra}")
+    correcta = pregunta['correcta'].upper()
+    if letra == correcta:
+        aciertos += 1
+        feedback = f"¡Correcto! {pregunta.get('explicacion', '')}"
+    else:
+        feedback = (
+            f"Incorrecto. La respuesta correcta era {correcta}: "
+            f"{pregunta['opciones'].get(correcta, '')}. "
+            f"{pregunta.get('explicacion', '')}"
         )
-        try:
-            raw = _groq([{'role': 'user', 'content': eval_prompt}], temperature=0.1, max_tokens=150)
-            if '```' in raw:
-                raw = raw.split('```')[1]
-                if raw.startswith('json'):
-                    raw = raw[4:]
-            data        = json.loads(raw.strip())
-            es_ok       = data.get('correcto', False)
-            explicacion = data.get('explicacion', '')
-            if es_ok:
-                aciertos += 1
-                feedback = f"¡Correcto! {explicacion}"
-            else:
-                feedback = f"Incorrecto. {explicacion} La respuesta era: {pregunta['respuesta_modelo'][:80]}."
-        except Exception as exc:
-            print(f"Error evaluando: {exc}")
-            feedback = "No pude evaluar tu respuesta. Continuamos."
 
     idx += 1
     n   = len(preguntas)
@@ -577,7 +786,7 @@ def _evaluar_respuesta(attrs, respuesta_val):
             email      = attrs['email'],
             asignatura = attrs['asignatura'],
             unidad     = attrs['unidad'],
-            tipo       = tipo,
+            tipo       = 'test',
             n          = n,
             aciertos   = aciertos,
         )
@@ -585,17 +794,15 @@ def _evaluar_respuesta(attrs, respuesta_val):
         nota = ("¡Excelente resultado!" if pct >= 80
                 else "Buen trabajo, sigue practicando." if pct >= 60
                 else "Necesitas repasar este tema. ¡Ánimo!")
-        # Limpiar datos del cuestionario pero mantener email/nombre para continuar
         attrs.update({
-            'estado':    'preguntando_continuar',
-            'preguntas': [],
+            'estado':          'preguntando_continuar',
+            'preguntas':       [],
             'pregunta_actual': 0,
-            'aciertos':  0,
+            'aciertos':        0,
         })
         attrs.pop('asignatura', None)
         attrs.pop('unidad', None)
         attrs.pop('tipo', None)
-        attrs.pop('modo', None)
         attrs.pop('num_preguntas', None)
         return _resp(
             f"{feedback} ¡Cuestionario completado! "
@@ -607,13 +814,11 @@ def _evaluar_respuesta(attrs, respuesta_val):
 
     attrs.update({'pregunta_actual': idx, 'aciertos': aciertos, 'preguntas': preguntas})
     siguiente = preguntas[idx]
-    msg = f"{feedback} Pregunta {idx + 1} de {n}: {siguiente['pregunta']} "
-    if tipo == 'test':
-        o = siguiente['opciones']
-        msg += f"A: {o['A']}. B: {o['B']}. C: {o['C']}."
-    elif attrs.get('modo') == 'facil' and siguiente.get('pista'):
-        msg += f"Pista: {siguiente['pista']}."
-
+    o         = siguiente['opciones']
+    msg = (
+        f"{feedback} Pregunta {idx + 1} de {n}: {siguiente['pregunta']} "
+        f"Opción A: {o['A']}. Opción B: {o['B']}. Opción C: {o['C']}."
+    )
     return _resp(msg, attrs=attrs)
 
 

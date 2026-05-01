@@ -21,6 +21,7 @@ export interface Unidad {
   ruta_s3: string;               // Ruta base en S3: voice-quizzer-maria/{email}/{asignatura}/{unidad}/
   tipo_archivo: TipoArchivo;
   nombre_archivo: string;        // Nombre del fichero (PDF/MD) o URL completa
+  resumen?: string;              // Último resumen generado por Alexa (guardado en VQ_Unidad)
 }
 
 export interface HistorialItem {

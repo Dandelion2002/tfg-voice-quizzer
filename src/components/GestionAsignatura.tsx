@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import {
   LayoutDashboard, Plus, RefreshCw, Trash2, Edit3, ChevronLeft,
   FileText, Save, Search, BarChart3, Loader2, AlertTriangle,
+  BookOpen, X, FileDown,
 } from 'lucide-react';
 import * as LucideIcons from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
@@ -52,6 +53,7 @@ async function fetchUnidades(email: string, nombre_asignatura: string): Promise<
     ruta_s3:             item.ruta_s3?.S ?? '',
     tipo_archivo:        (item.tipo_archivo?.S ?? 'PDF') as Unidad['tipo_archivo'],
     nombre_archivo:      item.nombre_archivo?.S ?? '',
+    resumen:             item.resumen?.S ?? '',
   }));
 }
 
@@ -126,6 +128,7 @@ export default function GestionAsignatura({
   const [saveError, setSaveError]               = useState('');
   const [showDeleteAsig, setShowDeleteAsig]     = useState(false);
   const [deletingAsig, setDeletingAsig]         = useState(false);
+  const [resumenModal, setResumenModal]         = useState<Unidad | null>(null);
 
   const loadUnidades = () => {
     setLoadingUnidades(true);
@@ -185,6 +188,42 @@ export default function GestionAsignatura({
     } catch {
       alert('Error eliminando la unidad.');
     }
+  };
+
+  const exportarPDF = (unidad: Unidad) => {
+    const win = window.open('', '_blank');
+    if (!win) return;
+    const parrafos = (unidad.resumen || '')
+      .split('\n\n')
+      .map(p => `<p>${p.replace(/\n/g, '<br>')}</p>`)
+      .join('');
+    win.document.write(`<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <title>Resumen – ${unidad.nombre_unidad}</title>
+  <style>
+    body { font-family: Georgia, serif; max-width: 720px; margin: 48px auto; color: #1a1a1a; line-height: 1.8; }
+    header { border-bottom: 2px solid #e84c0e; padding-bottom: 16px; margin-bottom: 32px; }
+    h1 { font-size: 1.4rem; margin: 0 0 4px; }
+    h2 { font-size: 1.1rem; color: #555; margin: 0 0 6px; font-weight: normal; }
+    .desc { color: #888; font-style: italic; margin: 0; font-size: 0.9rem; }
+    .resumen p { margin: 0 0 1.2em; }
+    @media print { body { margin: 24px; } }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>${unidad.nombre_asignatura}</h1>
+    <h2>${unidad.nombre_unidad}</h2>
+    <p class="desc">${unidad.descripcion || ''}</p>
+  </header>
+  <div class="resumen">${parrafos}</div>
+</body>
+</html>`);
+    win.document.close();
+    win.focus();
+    setTimeout(() => win.print(), 500);
   };
 
   const estadoBadge = (estado: Unidad['estado']) =>
@@ -381,6 +420,15 @@ export default function GestionAsignatura({
                       </td>
                       <td className="px-6 py-4 text-right">
                         <div className="flex items-center justify-end gap-2">
+                          {unidad.resumen && (
+                            <button
+                              onClick={() => setResumenModal(unidad)}
+                              className="p-2 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-all"
+                              title="Ver resumen"
+                            >
+                              <BookOpen className="w-4 h-4" />
+                            </button>
+                          )}
                           <button
                             onClick={() => onViewStats(unidad)}
                             className="p-2 text-gray-400 hover:text-tepro-orange hover:bg-orange-50 rounded-lg transition-all"
@@ -412,6 +460,59 @@ export default function GestionAsignatura({
           </div>
         </div>
       </main>
+
+      {/* Modal resumen */}
+      <AnimatePresence>
+        {resumenModal && (
+          <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-[100] p-6">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="bg-white rounded-3xl shadow-2xl max-w-2xl w-full max-h-[82vh] flex flex-col"
+            >
+              {/* Cabecera */}
+              <div className="px-8 py-6 border-b border-gray-100 flex items-start justify-between gap-4">
+                <div>
+                  <p className="text-xs font-bold text-tepro-orange uppercase tracking-widest mb-1">
+                    Resumen generado por Alexa
+                  </p>
+                  <h3 className="text-xl font-bold text-gray-900">{resumenModal.nombre_unidad}</h3>
+                  {resumenModal.descripcion && (
+                    <p className="text-sm text-gray-500 mt-1">{resumenModal.descripcion}</p>
+                  )}
+                </div>
+                <button
+                  onClick={() => setResumenModal(null)}
+                  className="p-2 hover:bg-gray-100 rounded-full transition-colors flex-shrink-0"
+                >
+                  <X className="w-5 h-5 text-gray-400" />
+                </button>
+              </div>
+
+              {/* Contenido */}
+              <div className="px-8 py-6 overflow-y-auto flex-1">
+                {(resumenModal.resumen || '').split('\n\n').map((parrafo, i) => (
+                  <p key={i} className="text-gray-700 leading-relaxed mb-4 text-sm">
+                    {parrafo}
+                  </p>
+                ))}
+              </div>
+
+              {/* Pie */}
+              <div className="px-8 py-4 border-t border-gray-100 flex justify-end">
+                <button
+                  onClick={() => exportarPDF(resumenModal)}
+                  className="flex items-center gap-2 px-6 py-2 bg-tepro-orange text-white rounded-xl font-bold hover:bg-orange-700 transition-all shadow-md active:scale-95 text-sm"
+                >
+                  <FileDown className="w-4 h-4" />
+                  Exportar a PDF
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
 
       {/* Modal confirmación borrar asignatura */}
       <AnimatePresence>
