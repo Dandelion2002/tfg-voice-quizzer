@@ -57,9 +57,13 @@ export default function Estadisticas({ email, unidad, onBack }: EstadisticasProp
       .finally(() => setLoading(false));
   }, [email, unidad]);
 
-  const chartData: DataPoint[] = historial.map(item => ({
-    date: new Date(item.fecha_hora).toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit' }),
+  const chartData: DataPoint[] = historial.map((item, idx) => ({
+    date: `#${idx + 1} ${new Date(item.fecha_hora).toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit' })}`,
+    fullLabel: new Date(item.fecha_hora).toLocaleString('es-ES', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }),
     percentage: item.num_preguntas > 0 ? Math.round((item.aciertos / item.num_preguntas) * 100) : 0,
+    tipo: item.tipo_cuestionario,
+    aciertos: item.aciertos,
+    total: item.num_preguntas,
   }));
 
   const lastPercentage  = chartData.length > 0 ? chartData[chartData.length - 1].percentage : 0;
@@ -128,7 +132,14 @@ export default function Estadisticas({ email, unidad, onBack }: EstadisticasProp
                     <YAxis domain={[0, 100]} axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: '#9ca3af' }} dx={-10} tickFormatter={(v) => `${v}%`} />
                     <Tooltip
                       contentStyle={{ backgroundColor: '#fff', borderRadius: '12px', border: '1px solid #f3f4f6', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}
-                      formatter={(value: number) => [`${value}%`, 'Aciertos']}
+                      formatter={(value: number, _name: string, props: any) => {
+                        const d = props.payload;
+                        return [`${value}% (${d.aciertos}/${d.total} correctas)`, d.tipo === 'test' ? 'Test' : 'Desarrollo'];
+                      }}
+                      labelFormatter={(_label: string, payload: any[]) => {
+                        if (payload && payload[0]) return payload[0].payload.fullLabel;
+                        return _label;
+                      }}
                     />
                     <Area type="monotone" dataKey="percentage" stroke="#F27D26" strokeWidth={3} fillOpacity={1} fill="url(#colorPct)" activeDot={{ r: 6, strokeWidth: 0, fill: '#F27D26' }} />
                   </AreaChart>

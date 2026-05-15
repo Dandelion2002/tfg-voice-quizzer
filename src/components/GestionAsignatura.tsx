@@ -190,40 +190,62 @@ export default function GestionAsignatura({
     }
   };
 
-  const exportarPDF = (unidad: Unidad) => {
-    const win = window.open('', '_blank');
-    if (!win) return;
-    const parrafos = (unidad.resumen || '')
-      .split('\n\n')
-      .map(p => `<p>${p.replace(/\n/g, '<br>')}</p>`)
-      .join('');
-    win.document.write(`<!DOCTYPE html>
-<html lang="es">
-<head>
-  <meta charset="UTF-8">
-  <title>Resumen – ${unidad.nombre_unidad}</title>
-  <style>
-    body { font-family: Georgia, serif; max-width: 720px; margin: 48px auto; color: #1a1a1a; line-height: 1.8; }
-    header { border-bottom: 2px solid #e84c0e; padding-bottom: 16px; margin-bottom: 32px; }
-    h1 { font-size: 1.4rem; margin: 0 0 4px; }
-    h2 { font-size: 1.1rem; color: #555; margin: 0 0 6px; font-weight: normal; }
-    .desc { color: #888; font-style: italic; margin: 0; font-size: 0.9rem; }
-    .resumen p { margin: 0 0 1.2em; }
-    @media print { body { margin: 24px; } }
-  </style>
-</head>
-<body>
-  <header>
-    <h1>${unidad.nombre_asignatura}</h1>
-    <h2>${unidad.nombre_unidad}</h2>
-    <p class="desc">${unidad.descripcion || ''}</p>
-  </header>
-  <div class="resumen">${parrafos}</div>
-</body>
-</html>`);
-    win.document.close();
-    win.focus();
-    setTimeout(() => win.print(), 500);
+  const exportarPDF = async (unidad: Unidad) => {
+    const { jsPDF } = await import('jspdf');
+
+    const doc      = new jsPDF({ unit: 'mm', format: 'a4' });
+    const mX       = 20;          // margen horizontal
+    const anchoUtil = 170;        // 210 - 2*20
+    const altoPag  = 280;         // altura útil antes de saltar de página
+    let y = 22;
+
+    // ── Cabecera ──────────────────────────────────────────────────────
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(15);
+    doc.setTextColor(30, 30, 30);
+    doc.text(unidad.nombre_asignatura, mX, y);
+    y += 7;
+
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(11);
+    doc.setTextColor(80, 80, 80);
+    doc.text(unidad.nombre_unidad, mX, y);
+    y += 5;
+
+    if (unidad.descripcion) {
+      doc.setFontSize(9);
+      doc.setTextColor(140, 140, 140);
+      const descLineas = doc.splitTextToSize(unidad.descripcion, anchoUtil);
+      doc.text(descLineas, mX, y);
+      y += descLineas.length * 4 + 2;
+    }
+
+    // línea naranja separadora
+    doc.setDrawColor(232, 76, 14);
+    doc.setLineWidth(0.5);
+    doc.line(mX, y, 210 - mX, y);
+    y += 9;
+
+    // ── Cuerpo del resumen ────────────────────────────────────────────
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(10.5);
+    doc.setTextColor(30, 30, 30);
+
+    const parrafos = (unidad.resumen || '').split('\n\n').filter(Boolean);
+    for (const parrafo of parrafos) {
+      const lineas = doc.splitTextToSize(parrafo.replace(/\n/g, ' '), anchoUtil);
+      if (y + lineas.length * 5.5 > altoPag) {
+        doc.addPage();
+        y = 20;
+      }
+      doc.text(lineas, mX, y);
+      y += lineas.length * 5.5 + 4;
+    }
+
+    // ── Abrir PDF en nueva pestaña ────────────────────────────────────
+    const blob = doc.output('blob');
+    const url  = URL.createObjectURL(blob);
+    window.open(url, '_blank');
   };
 
   const estadoBadge = (estado: Unidad['estado']) =>

@@ -409,12 +409,26 @@ def _tipo(attrs, slots, intent_name=''):
                 .replace('á','a').replace('é','e').replace('í','i')
                 .replace('ó','o').replace('ú','u').replace('ñ','n'))
 
-    # --- Recopilar texto de todos los slots ---
+    # --- Recopilar texto de todos los slots (valor directo + valor resuelto) ---
     fragmentos = []
     for slot_obj in (slots or {}).values():
-        sv = (slot_obj or {}).get('value', '') or ''
+        if not slot_obj:
+            continue
+
+        # 1) Valor literal (lo que el usuario dijo)
+        sv = slot_obj.get('value', '') or ''
         if sv.strip():
             fragmentos.append(_norm(sv.strip()))
+
+        # 2) Valor canónico resuelto (resolutions, más fiable con sinónimos)
+        try:
+            resolved = (slot_obj['resolutions']
+                        ['resolutionsPerAuthority'][0]
+                        ['values'][0]['value']['name'])
+            if resolved and resolved.strip():
+                fragmentos.append(_norm(resolved.strip()))
+        except (KeyError, IndexError, TypeError):
+            pass
 
     texto = ' '.join(fragmentos)
 
@@ -543,6 +557,19 @@ def _segmentar(texto, max_chars=500):
     return resultado if resultado else [texto[:max_chars]]
 
 
+def _limpiar_intro(texto):
+    """Elimina frases introductorias que el LLM añade aunque se le pida que no."""
+    import re
+    patron = re.compile(
+        r'^(aqu[ií]\s+(?:te\s+)?(?:presento|está|tienes)\s+el\s+resumen[^:\n]*[:\n]+|'
+        r'a\s+continuaci[oó]n\s+(?:te\s+)?(?:presento|está)[^:\n]*[:\n]+|'
+        r'el\s+siguiente\s+(?:es\s+el\s+)?resumen[^:\n]*[:\n]+|'
+        r'resumen\s+del\s+contenido[^:\n]*[:\n]+)',
+        re.IGNORECASE
+    )
+    return patron.sub('', texto).strip()
+
+
 def _generar_repaso(attrs):
     """Genera un resumen del temario con Claude y empieza a recitarlo por segmentos."""
     email      = attrs['email']
@@ -578,6 +605,7 @@ def _generar_repaso(attrs):
 
     try:
         resumen = _groq([{'role': 'user', 'content': prompt}], temperature=0.3, max_tokens=3000)
+        resumen = _limpiar_intro(resumen)
         print(f"[REPASO DEBUG] Resumen generado, longitud: {len(resumen)}")
     except Exception as exc:
         print(f"Error generando resumen: {exc}")
