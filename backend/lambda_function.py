@@ -1,10 +1,15 @@
 """
-Voice Quizzer — Alexa Skill Lambda Handler
-==========================================
-Sin dependencias externas: usa boto3 (built-in en Lambda) para DynamoDB, S3 y Bedrock.
+Autor:   María León Pérez
+Resumen: Handler principal de la Alexa Skill de Voice Quizzer, desplegado como función AWS Lambda.
+         Implementa una máquina de estados conversacional que gestiona la vinculación de cuenta
+         por PIN, la selección de asignatura/unidad, el modo 'repasar' (resumen generado por
+         Claude 3 Haiku recitado en segmentos) y el modo 'test' (cuestionario tipo test con
+         evaluación automática). Persiste el historial en DynamoDB y los resúmenes en VQ_Unidad.
+         No requiere dependencias externas: usa únicamente boto3 (built-in en el runtime Lambda).
 
 Variables de entorno requeridas:
-  AWS_BUCKET_NAME, AWS_REGION_NAME
+  AWS_BUCKET_NAME   — bucket S3 donde se almacenan los chunks.json de cada unidad
+  AWS_REGION_NAME   — región AWS del bucket y de las tablas DynamoDB (ej. eu-west-3)
 """
 
 import os
@@ -35,7 +40,15 @@ _chunks_cache: dict = {}
 # ── Extractor de JSON robusto ─────────────────────────────────────────────────
 
 def _extraer_json(texto, array=True):
-    """Extrae JSON del texto del LLM manejando múltiples arrays, markdown y texto extra."""
+    """Extrae JSON válido del texto devuelto por el LLM.
+
+    El modelo a veces envuelve la respuesta en bloques markdown (```json) o añade
+    texto explicativo antes/después del JSON. Esta función lo elimina y localiza
+    el JSON real usando dos estrategias:
+      - array=True: recorre carácter a carácter buscando objetos {...} independientes
+        y los reensambla en un array; si falla, busca el primer '[' y el último ']'.
+      - array=False: busca el primer '{' y el último '}'.
+    """
     import re
     texto = re.sub(r'```(?:json)?', '', texto).strip()
 
@@ -70,8 +83,15 @@ def _extraer_json(texto, array=True):
 
 # ── Bedrock (Claude 3 Haiku) ──────────────────────────────────────────────────
 
-def _groq(messages, temperature=0.4, max_tokens=4000):
-    """Llama a AWS Bedrock (Claude 3 Haiku) usando boto3."""
+def _llm(messages, temperature=0.4, max_tokens=4000):
+    """Invoca Claude 3 Haiku en AWS Bedrock mediante la API Converse.
+
+    Se usa la región eu-west-1 (única que expone Claude 3 Haiku en Bedrock Europa).
+    El parámetro 'system' se separa de los mensajes de conversación porque la API
+    Converse lo requiere como campo de nivel superior, no como mensaje con role='system'.
+    La temperatura baja (0.3–0.4) es deliberada: queremos respuestas consistentes y
+    factuales, no creativas.
+    """
 
     bedrock = boto3.client('bedrock-runtime', region_name='eu-west-1')
 
@@ -113,6 +133,11 @@ def _groq(messages, temperature=0.4, max_tokens=4000):
 # ── Handler principal ─────────────────────────────────────────────────────────
 
 def handler(event, context):
+    """Punto de entrada de la Lambda. Alexa envía un JSON con 'request.type':
+      - LaunchRequest: el usuario abre la skill sin decir nada.
+      - IntentRequest: el usuario ha dicho algo que Alexa ha clasificado como intent.
+      - SessionEndedRequest: la sesión terminó de forma abrupta (timeout, error).
+    """
     req_type = event['request']['type']
 
     if req_type == 'LaunchRequest':
@@ -128,6 +153,10 @@ def handler(event, context):
 # ── LaunchRequest ─────────────────────────────────────────────────────────────
 
 def _handle_launch(event):
+    """Gestiona la apertura de la skill. Si el dispositivo ya está vinculado a una
+    cuenta, saluda al usuario por su nombre y lista sus asignaturas. Si no, solicita
+    el PIN de vinculación de 6 dígitos.
+    """
     device_id = event['context']['System']['device']['deviceId']
     user      = _get_user_by_device(device_id)
 
@@ -166,6 +195,12 @@ def _handle_launch(event):
 # ── IntentRequest ─────────────────────────────────────────────────────────────
 
 def _handle_intent(event):
+    """Router central de la máquina de estados. El estado ('estado') guardado en
+    sessionAttributes tiene PRIORIDAD sobre el nombre del intent: esto permite que el
+    usuario diga cualquier cosa mientras está en un estado determinado sin que Alexa
+    confunda el intent. Los intents globales (Stop, Cancel, Help) se procesan siempre
+    antes del routing por estado.
+    """
     name   = event['request']['intent']['name']
     slots  = event['request']['intent'].get('slots', {})
     attrs  = event.get('session', {}).get('attributes', {}) or {}
@@ -266,7 +301,7 @@ def _handle_intent(event):
 
 
 def _primer_slot(slots):
-    """Devuelve el valor del primer slot que tenga contenido."""
+    """Devuelve el valor literal del primer slot no vacío del intent."""
     for slot in slots.values():
         if slot and slot.get('value'):
             return str(slot['value'])
@@ -282,7 +317,9 @@ _NUMEROS_ES = {
 }
 
 def _extraer_numero(texto):
-    """Intenta extraer un número de un texto en español."""
+    """Extrae un entero del texto recibido de Alexa, soportando dígitos y palabras en español.
+    Alexa puede enviar el número como texto ("tres") o como cifra ("3").
+    """
     if not texto:
         return None
     try:
@@ -299,6 +336,12 @@ def _extraer_numero(texto):
 # ── Intents ───────────────────────────────────────────────────────────────────
 
 def _vincular(event, attrs, slots):
+    """Vincula el dispositivo Alexa a una cuenta de usuario mediante PIN de 6 dígitos.
+    Busca el PIN en la tabla VQ_Usuarios y, si existe, asocia el deviceId de Alexa al
+    email del usuario (campo alexa_user_id). Esta vinculación es equivalente al
+    mecanismo de TV pairing de Netflix/Disney+: el usuario ve el PIN en la app web y lo
+    dice en voz alta a Alexa para emparejar el dispositivo sin necesidad de teclado.
+    """
     pin_raw   = (slots.get('pin') or {}).get('value', '') or ''
     pin       = str(pin_raw).replace(' ', '').strip()
     device_id = event['context']['System']['device']['deviceId']
@@ -344,6 +387,11 @@ def _vincular(event, attrs, slots):
 
 
 def _numero(attrs, slots):
+    """Maneja la selección numérica en tres estados distintos:
+      - eligiendo_asignatura: selecciona asignatura de la lista del usuario.
+      - eligiendo_unidad: selecciona unidad y pasa a eligiendo_tipo.
+      - eligiendo_num_preguntas: valida rango 1-20 y lanza _generar_cuestionario.
+    """
     val    = (slots.get('numero') or {}).get('value', '')
     estado = attrs.get('estado', '')
 
@@ -515,7 +563,11 @@ def _no(attrs):
 # ── Repaso ────────────────────────────────────────────────────────────────────
 
 def _segmentar(texto, max_chars=500):
-    """Divide el texto en segmentos de ~max_chars caracteres cortando en párrafos."""
+    """Divide el resumen en segmentos aptos para la síntesis de voz de Alexa.
+    Alexa tiene un límite práctico de ~600 caracteres por respuesta antes de que
+    el texto suene monótono o se corte. El algoritmo prioriza cortar en párrafos
+    (doble salto de línea) y, si un párrafo es demasiado largo, corta por frases.
+    """
     parrafos = [p.strip() for p in texto.replace('\r\n', '\n').split('\n\n') if p.strip()]
     if not parrafos:
         parrafos = [texto.strip()]
@@ -558,7 +610,11 @@ def _segmentar(texto, max_chars=500):
 
 
 def _limpiar_intro(texto):
-    """Elimina frases introductorias que el LLM añade aunque se le pida que no."""
+    """Elimina frases introductorias que el LLM incluye pese a la instrucción explícita
+    de no hacerlo ('Aquí te presento el resumen:', 'A continuación...'). Es un problema
+    conocido de los modelos de lenguaje: aunque el prompt diga 'ESCRIBE ÚNICAMENTE el
+    resumen', el modelo tiende a añadir una frase de cortesía inicial.
+    """
     import re
     patron = re.compile(
         r'^(aqu[ií]\s+(?:te\s+)?(?:presento|está|tienes)\s+el\s+resumen[^:\n]*[:\n]+|'
@@ -571,7 +627,13 @@ def _limpiar_intro(texto):
 
 
 def _generar_repaso(attrs):
-    """Genera un resumen del temario con Claude y empieza a recitarlo por segmentos."""
+    """Genera un resumen del 35% del temario con Claude 3 Haiku y lo recita en segmentos.
+    Los chunks.json de la unidad se cachean en el diccionario _chunks_cache (persiste
+    entre invocaciones calientes de la misma Lambda) para evitar descargas repetidas de S3.
+    Si el resumen cabe en un único segmento, se guarda y pasa directamente a
+    'preguntando_continuar'; si no, entra en el estado 'repasando' y espera confirmación
+    del usuario entre segmento y segmento.
+    """
     email      = attrs['email']
     asignatura = attrs['asignatura']
     unidad     = attrs['unidad']
@@ -604,7 +666,7 @@ def _generar_repaso(attrs):
     )
 
     try:
-        resumen = _groq([{'role': 'user', 'content': prompt}], temperature=0.3, max_tokens=3000)
+        resumen = _llm([{'role': 'user', 'content': prompt}], temperature=0.3, max_tokens=3000)
         resumen = _limpiar_intro(resumen)
         print(f"[REPASO DEBUG] Resumen generado, longitud: {len(resumen)}")
     except Exception as exc:
@@ -643,7 +705,10 @@ def _generar_repaso(attrs):
 
 
 def _siguiente_segmento(attrs):
-    """Avanza al siguiente segmento del repaso."""
+    """Avanza al siguiente segmento del repaso y guarda el resumen completo en DynamoDB
+    cuando se alcanza el último segmento. Incluye una comprobación de seguridad para el
+    caso borde en que el índice ya haya superado el total (no debería ocurrir en flujo normal).
+    """
     segmentos = attrs.get('segmentos', [])
     idx       = attrs.get('segmento_actual', 0) + 1
     total     = len(segmentos)
@@ -681,7 +746,12 @@ def _siguiente_segmento(attrs):
 
 
 def _finalizar_repaso(attrs, cerrar=False):
-    """Guarda el resumen parcial/completo y termina el repaso."""
+    """Persiste el resumen (completo o parcial) en DynamoDB y concluye el repaso.
+    Se llama tanto al completar todos los segmentos como cuando el usuario dice 'stop'
+    a mitad del repaso. En este último caso (cerrar=True) termina la sesión de Alexa.
+    Guardar el resumen parcial garantiza que el usuario pueda releer en la web lo que
+    Alexa ya había recitado, aunque no haya escuchado el texto completo.
+    """
     segmentos = attrs.get('segmentos', [])
     if segmentos:
         _guardar_resumen(
@@ -705,7 +775,11 @@ def _finalizar_repaso(attrs, cerrar=False):
 
 
 def _guardar_resumen(email, asignatura, unidad, resumen):
-    """Guarda el resumen en el campo 'resumen' de VQ_Unidad."""
+    """Persiste el texto del resumen en el campo 'resumen' de la tabla VQ_Unidad.
+    La clave compuesta es id_unidad (email#asignatura#unidad) + detalle_archivo
+    (asignatura#unidad), igual que en el resto de operaciones sobre esa tabla.
+    Los errores se capturan silenciosamente para no interrumpir el flujo conversacional.
+    """
     if not email or not asignatura or not unidad or not resumen:
         return
     try:
@@ -727,6 +801,12 @@ def _guardar_resumen(email, asignatura, unidad, resumen):
 # ── Lógica del cuestionario (solo test) ──────────────────────────────────────
 
 def _generar_cuestionario(attrs):
+    """Genera el cuestionario tipo test usando RAG + Claude 3 Haiku.
+    El prompt fuerza al modelo a responder SOLO con un array JSON válido (sin markdown
+    ni texto extra) porque _extraer_json necesita encontrar los objetos del array.
+    Si el modelo devuelve menos preguntas de las solicitadas, se repiten hasta completar n
+    (caso borde que ocurre con unidades de contenido muy corto).
+    """
     email      = attrs['email']
     asignatura = attrs['asignatura']
     unidad     = attrs['unidad']
@@ -761,7 +841,7 @@ def _generar_cuestionario(attrs):
     )
 
     try:
-        raw = _groq([{'role': 'user', 'content': prompt}], temperature=0.4, max_tokens=4000)
+        raw = _llm([{'role': 'user', 'content': prompt}], temperature=0.4, max_tokens=4000)
         print(f"[RAW LLM] >>>{raw[:800]}<<<")
         extraido  = _extraer_json(raw, array=True)
         preguntas = json.loads(extraido)
@@ -793,6 +873,14 @@ def _generar_cuestionario(attrs):
 
 
 def _evaluar_respuesta(attrs, respuesta_val):
+    """Evalúa la respuesta oral del usuario a la pregunta actual del test.
+    La extracción de letra (A/B/C) usa tres niveles de regex en orden de especificidad:
+      1. 'opción A/B/C' (lo más explícito).
+      2. Letra sola como palabra entera (\b[abc]\b).
+      3. Primera letra a/b/c que aparezca en el texto.
+    Al finalizar el cuestionario guarda el resultado en VQ_Historial y transita a
+    'preguntando_continuar' para ofrecer seguir estudiando sin reabrir la skill.
+    """
     if attrs.get('estado') != 'en_cuestionario':
         return _resp("No hay ningún cuestionario activo.", attrs=attrs)
 
@@ -879,6 +967,10 @@ def _evaluar_respuesta(attrs, respuesta_val):
 # ── DynamoDB helpers ──────────────────────────────────────────────────────────
 
 def _get_user_by_device(device_id):
+    """Busca en VQ_Usuarios el usuario vinculado al deviceId de Alexa.
+    Se usa Scan con FilterExpression porque DynamoDB no tiene un GSI sobre alexa_user_id
+    en esta versión. Para un volumen de usuarios pequeño (TFG) el coste es asumible.
+    """
     try:
         res   = tabla_usuarios.scan(FilterExpression=Attr('alexa_user_id').eq(device_id))
         items = res.get('Items', [])
@@ -889,6 +981,7 @@ def _get_user_by_device(device_id):
 
 
 def _get_user_by_pin(pin):
+    """Busca el usuario cuyo pin_vinculacion coincide con el PIN dicho por el usuario."""
     try:
         res   = tabla_usuarios.scan(FilterExpression=Attr('pin_vinculacion').eq(pin))
         items = res.get('Items', [])
@@ -899,6 +992,7 @@ def _get_user_by_pin(pin):
 
 
 def _link_device(email, device_id):
+    """Asocia el deviceId de Alexa al usuario identificado por email en VQ_Usuarios."""
     tabla_usuarios.update_item(
         Key={'email': email},
         UpdateExpression='SET alexa_user_id = :d',
@@ -907,6 +1001,10 @@ def _link_device(email, device_id):
 
 
 def _get_asignaturas(email):
+    """Devuelve la lista ordenada de asignaturas del usuario consultando VQ_Unidad.
+    Se deduplican con set() porque cada unidad tiene su propia fila en la tabla y
+    el nombre de asignatura puede repetirse.
+    """
     try:
         res   = tabla_unidades.scan(FilterExpression=Attr('email').eq(email))
         items = res.get('Items', [])
@@ -917,6 +1015,10 @@ def _get_asignaturas(email):
 
 
 def _get_unidades(email, asignatura):
+    """Devuelve las unidades en estado 'listo' de una asignatura, ordenadas por fecha de creación.
+    Solo se muestran unidades con estado='listo' (índice FAISS ya generado) porque si el
+    índice no existe la Lambda no podrá cargar los chunks.json y el cuestionario fallará.
+    """
     try:
         res = tabla_unidades.scan(
             FilterExpression=(
@@ -933,6 +1035,10 @@ def _get_unidades(email, asignatura):
 
 
 def _guardar_historial(email, asignatura, unidad, tipo, n, aciertos):
+    """Registra el resultado de un cuestionario en VQ_Historial.
+    La clave de ordenación es fecha_hora (ISO 8601 UTC) más id_historial (UUID) como
+    desempate, garantizando unicidad incluso si dos cuestionarios se completan en el mismo segundo.
+    """
     try:
         tabla_historial.put_item(Item={
             'email':             email,
@@ -951,6 +1057,10 @@ def _guardar_historial(email, asignatura, unidad, tipo, n, aciertos):
 # ── Builder de respuesta Alexa ────────────────────────────────────────────────
 
 def _resp(speech, attrs=None, end=False):
+    """Construye el JSON de respuesta Alexa SDK v2.
+    Si attrs es None no incluye sessionAttributes (Alexa borrará los atributos de sesión).
+    end=True cierra la sesión; end=False mantiene el micrófono abierto esperando más input.
+    """
     r = {
         'version': '1.0',
         'response': {

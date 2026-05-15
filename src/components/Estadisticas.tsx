@@ -1,3 +1,9 @@
+// Autor:   María León Pérez
+// Resumen: Pantalla de estadísticas de progreso para una unidad concreta. Muestra un
+//          gráfico de área (Recharts) con la evolución del porcentaje de aciertos en
+//          orden cronológico, y tres métricas resumen: media, mejor resultado y total
+//          de cuestionarios. Incluye un indicador visual (verde/rojo) según si el último
+//          resultado supera el 70% de aciertos.
 import React, { useState, useEffect } from 'react';
 import { ChevronLeft, BarChart3, TrendingUp, TrendingDown, Loader2 } from 'lucide-react';
 import { motion } from 'motion/react';
@@ -18,6 +24,12 @@ interface DataPoint {
   percentage: number;
 }
 
+/**
+ * Recupera el historial de cuestionarios de una unidad específica con un Scan de
+ * VQ_Historial filtrando por email, asignatura y unidad. Los resultados se ordenan
+ * cronológicamente (ascendente) para que el gráfico de área muestre la progresión
+ * temporal de izquierda a derecha.
+ */
 async function fetchHistorialUnidad(
   email: string,
   nombre_asignatura: string,

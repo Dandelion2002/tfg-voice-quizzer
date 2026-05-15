@@ -1,16 +1,19 @@
 """
-Voice Quizzer — Backend Flask (RAG Processor)
-==============================================
-Expone un único endpoint:
-    POST /procesar  →  descarga el archivo de S3, genera el índice FAISS
-                       y lo sube a  .../index/index.faiss + index.pkl
+Autor:   María León Pérez
+Resumen: Microservicio Flask que implementa la fase de indexación del pipeline RAG.
+         Cuando el usuario sube un PDF, Markdown o URL desde la web, el frontend llama
+         a POST /procesar. Este endpoint descarga el archivo de S3, lo fragmenta con
+         LangChain (chunk_size=1000, overlap=200), genera embeddings semánticos con
+         all-MiniLM-L6-v2 (HuggingFace), construye un índice FAISS y lo sube de vuelta
+         a S3 junto con chunks.json (texto plano de los fragmentos, usado por la Lambda).
+         Finalmente actualiza el estado de la unidad en DynamoDB de 'pendiente' a 'listo'.
 
-Cómo arrancar:
+Cómo arrancar (desarrollo local):
     cd backend
     pip install -r requirements.txt
-    python api.py
+    python api.py          # escucha en http://localhost:5000
 
-Requiere un archivo .env en esta carpeta con:
+Requiere un archivo .env con:
     AWS_REGION, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_BUCKET_NAME
 """
 
@@ -68,15 +71,19 @@ CORS(app, origins=[
 
 @app.route('/procesar', methods=['POST'])
 def procesar():
-    """
+    """Orquesta el pipeline RAG completo para una unidad nueva o actualizada.
+
     Body JSON esperado:
-    {
-        "email":              "maria@ejemplo.com",
-        "nombre_asignatura":  "Matemáticas",
-        "nombre_unidad":      "Tema 1",
-        "tipo_archivo":       "PDF" | "Markdown" | "URL",
-        "nombre_archivo":     "apuntes.pdf" | "notas.md" | "https://..."
-    }
+      { "email", "nombre_asignatura", "nombre_unidad", "tipo_archivo", "nombre_archivo" }
+
+    Pasos:
+      1. Carga el documento (S3 para PDF/Markdown, WebBaseLoader para URL).
+      2. Genera y sube el índice FAISS + chunks.json a S3.
+      3. Marca la unidad como 'listo' en DynamoDB.
+
+    Los errores en el paso 3 (RAG) se capturan en el frontend (GestionUnidad.tsx) sin
+    bloquear al usuario: el archivo queda guardado en estado 'pendiente' y puede
+    reintentarse más tarde.
     """
     data = request.get_json(force=True)
     email             = data.get('email', '').strip()
@@ -118,7 +125,10 @@ def procesar():
 # ── Helpers internos ──────────────────────────────────────────────────────────
 
 def _cargar_documentos(ruta_base, tipo_archivo, nombre_archivo):
-    """Descarga el archivo de S3 (o carga la URL) y devuelve los documentos LangChain."""
+    """Descarga el archivo de S3 al sistema de ficheros temporal y lo carga con LangChain.
+    Para URLs usa WebBaseLoader directamente (sin paso por S3). El archivo temporal se
+    elimina en el bloque finally para no llenar el disco del servidor.
+    """
 
     if tipo_archivo == 'URL':
         # La URL está en nombre_archivo (guardada en DynamoDB por el frontend)
@@ -151,7 +161,13 @@ def _cargar_documentos(ruta_base, tipo_archivo, nombre_archivo):
 
 
 def _generar_y_subir_index(docs, index_prefix):
-    """Fragmenta, vectoriza con HuggingFace y sube index.faiss + index.pkl + chunks.json a S3."""
+    """Fragmenta los documentos, genera embeddings y sube tres artefactos a S3:
+      - chunks.json: texto plano de cada fragmento, usado por la Lambda en inferencia.
+      - index.faiss: vectores FAISS serializados para búsqueda semántica (~133 KB).
+      - index.pkl:   metadatos de los documentos asociados a cada vector (~88 KB).
+    Se eligió all-MiniLM-L6-v2 (22M parámetros, 384 dimensiones) por su equilibrio
+    entre calidad semántica y tiempo de indexación en CPU.
+    """
 
     # Dividir en chunks
     splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
@@ -183,7 +199,9 @@ def _generar_y_subir_index(docs, index_prefix):
 
 
 def _actualizar_estado(email, nombre_asignatura, nombre_unidad):
-    """Marca la unidad como 'listo' en DynamoDB."""
+    """Actualiza el campo 'estado' de VQ_Unidad a 'listo' para que la Lambda pueda
+    mostrar la unidad en la selección de Alexa y el frontend muestre el badge verde.
+    """
     id_unidad       = f"{email}#{nombre_asignatura}#{nombre_unidad}"
     detalle_archivo = f"{nombre_asignatura}#{nombre_unidad}"
 

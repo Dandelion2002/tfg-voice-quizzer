@@ -1,3 +1,9 @@
+// Autor:   María León Pérez
+// Resumen: Componente raíz de la SPA. Gestiona el enrutamiento mediante un estado
+//          'currentScreen' (en lugar de React Router) porque la app tiene una
+//          jerarquía de pantallas plana y predecible. Almacena el usuario actual,
+//          la asignatura seleccionada y la unidad seleccionada como estado compartido,
+//          pasándolo hacia abajo por props a cada pantalla.
 import React, { useState } from 'react';
 import Home from './components/Home';
 import GestionAsignatura from './components/GestionAsignatura';

@@ -1,3 +1,10 @@
+// Autor:   María León Pérez
+// Resumen: Pantalla de gestión de una asignatura. Permite editar la descripción e icono,
+//          ver y gestionar todas las unidades (crear, editar, eliminar, ver estadísticas)
+//          y ver el resumen generado por Alexa en un modal con opción de exportar a PDF
+//          usando jsPDF. La eliminación de asignatura borra en cascada todas las unidades
+//          y sus archivos en S3 mediante Promise.allSettled (best-effort, no aborta si
+//          algún archivo S3 ya no existe).
 import React, { useState, useEffect } from 'react';
 import {
   LayoutDashboard, Plus, RefreshCw, Trash2, Edit3, ChevronLeft,
@@ -31,6 +38,7 @@ interface GestionAsignaturaProps {
 
 // ── DynamoDB helpers ──────────────────────────────────────────────────────────
 
+/** Recupera todas las unidades de una asignatura desde VQ_Unidad. */
 async function fetchUnidades(email: string, nombre_asignatura: string): Promise<Unidad[]> {
   const res  = await dynamo('DynamoDB_20120810.Scan', {
     TableName: 'VQ_Unidad',
@@ -97,6 +105,11 @@ async function deleteUnidad(unidad: Unidad): Promise<void> {
   });
 }
 
+/**
+ * Elimina la asignatura en cascada: primero borra el archivo S3 y el registro DynamoDB
+ * de cada unidad con Promise.allSettled (los errores individuales no detienen el proceso),
+ * y después borra el registro de la propia asignatura en VQ_Asignatura.
+ */
 async function deleteAsignatura(
   email: string,
   nombre_asignatura: string,
@@ -190,6 +203,12 @@ export default function GestionAsignatura({
     }
   };
 
+  /**
+   * Genera un PDF del resumen de la unidad con jsPDF y lo abre en una nueva pestaña.
+   * jsPDF se importa dinámicamente (lazy import) para no incluirlo en el bundle inicial.
+   * El texto del resumen se divide por párrafos ('\n\n') y cada uno se ajusta al ancho
+   * de página con splitTextToSize. Salta de página automáticamente si no cabe el párrafo.
+   */
   const exportarPDF = async (unidad: Unidad) => {
     const { jsPDF } = await import('jspdf');
 

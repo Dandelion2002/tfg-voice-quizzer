@@ -1,3 +1,8 @@
+// Autor:   María León Pérez
+// Resumen: Pantalla de historial global de cuestionarios del usuario. Lista todos los
+//          cuestionarios realizados con Alexa, ordenados del más reciente al más antiguo.
+//          Cada entrada muestra asignatura, unidad, fecha, tipo de cuestionario y un
+//          indicador circular SVG con el porcentaje de aciertos en verde/rojo.
 import React, { useState, useEffect } from 'react';
 import {
   ChevronLeft, History as HistoryIcon, Calendar, BookOpen,
@@ -13,6 +18,11 @@ interface HistoryProps {
   onBack: () => void;
 }
 
+/**
+ * Recupera todo el historial de cuestionarios del usuario desde VQ_Historial
+ * y lo ordena por fecha descendente (más recientes primero) usando localeCompare
+ * sobre las cadenas ISO 8601, que son comparables lexicográficamente.
+ */
 async function fetchHistorial(email: string): Promise<HistorialItem[]> {
   const res  = await dynamo('DynamoDB_20120810.Scan', {
     TableName: 'VQ_Historial',

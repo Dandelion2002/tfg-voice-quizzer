@@ -1,3 +1,10 @@
+// Autor:   María León Pérez
+// Resumen: Pantalla de perfil de usuario. Permite editar el nombre, cambiar la contraseña
+//          (verificando la antigua antes de actualizar) y eliminar la cuenta con modal de
+//          confirmación. La sección de foto de perfil está preparada para subir imágenes
+//          a S3 (s3Upload + s3PresignedUrl) aunque la foto no se muestra en el avatar
+//          (campo reservado para versiones futuras). La zona de peligro ('Borrar Cuenta')
+//          solo elimina el registro de VQ_Usuarios, no las asignaturas ni unidades.
 import React, { useState, useEffect, useRef } from 'react';
 import {
   ChevronLeft, User, Mail, Shield, Calendar, Edit2, Lock, Save, X,

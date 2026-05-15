@@ -1,3 +1,8 @@
+// Autor:   María León Pérez
+// Resumen: Dashboard principal tras el login. Lista las asignaturas del usuario en una
+//          cuadrícula con búsqueda en tiempo real. Permite crear nuevas asignaturas
+//          mediante un modal con selector de icono dinámico (Lucide React). El menú de
+//          usuario (avatar) muestra el PIN de Alexa y los accesos a perfil e historial.
 import React, { useState, useRef, useEffect } from 'react';
 import { Search, ArrowRight, User, Settings, History, LogOut, Plus, X, Loader2 } from 'lucide-react';
 import * as LucideIcons from 'lucide-react';
@@ -25,6 +30,11 @@ const AVAILABLE_ICONS = [
 
 // ── DynamoDB helpers ──────────────────────────────────────────────────────────
 
+/**
+ * Recupera todas las asignaturas del usuario desde VQ_Asignatura usando Scan con
+ * FilterExpression. Se acepta el coste de Scan porque el número de asignaturas por
+ * usuario es pequeño y no se dispone de un GSI sobre el campo 'email' en esta tabla.
+ */
 async function fetchAsignaturas(email: string): Promise<Asignatura[]> {
   const res  = await dynamo('DynamoDB_20120810.Scan', {
     TableName: 'VQ_Asignatura',
@@ -40,6 +50,11 @@ async function fetchAsignaturas(email: string): Promise<Asignatura[]> {
   }));
 }
 
+/**
+ * Inserta una nueva asignatura en VQ_Asignatura con ConditionExpression para evitar
+ * duplicados. Si el nombre ya existe, DynamoDB devuelve ConditionalCheckFailedException
+ * que se traduce en un mensaje de error legible para el usuario.
+ */
 async function crearAsignatura(asignatura: Asignatura): Promise<{ error?: string }> {
   const id  = `${asignatura.email}#${asignatura.nombre_asignatura}`;
   const res = await dynamo('DynamoDB_20120810.PutItem', {

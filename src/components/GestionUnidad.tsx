@@ -1,3 +1,10 @@
+// Autor:   María León Pérez
+// Resumen: Pantalla de creación y edición de unidades didácticas. Gestiona la subida de
+//          archivos PDF/Markdown directamente a S3 (upload firmado con AWS Signature V4)
+//          y el guardado de URLs externas. Tras guardar en DynamoDB llama al backend Flask
+//          (POST /procesar) para disparar la indexación RAG. Si Flask no está disponible,
+//          la unidad queda en estado 'pendiente' y puede reintentarse más tarde.
+//          El nombre de la unidad es inmutable una vez creada (es parte de la clave S3).
 import React, { useState } from 'react';
 import {
   ChevronLeft, Upload, FileText, Trash2, Eye, RefreshCw, Save, Link, ExternalLink,
@@ -15,6 +22,12 @@ interface GestionUnidadProps {
 
 // ── DynamoDB helpers ──────────────────────────────────────────────────────────
 
+/**
+ * Persiste la unidad en VQ_Unidad con PutItem. En modo creación usa ConditionExpression
+ * para rechazar nombres duplicados dentro de la misma asignatura. En modo edición omite
+ * la condición porque el registro ya existe y queremos sobreescribirlo.
+ * La detección de modo (creación vs edición) se basa en si fecha_creacion === fecha_actualizacion.
+ */
 async function guardarUnidad(unidad: Unidad): Promise<{ error?: string }> {
   const id  = `${unidad.email}#${unidad.nombre_asignatura}#${unidad.nombre_unidad}`;
   const res = await dynamo('DynamoDB_20120810.PutItem', {

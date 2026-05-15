@@ -1,2 +1,5 @@
-// Los datos mock han sido reemplazados por llamadas reales a DynamoDB y S3.
-// Este archivo se conserva por si se necesita añadir constantes globales en el futuro.
+// Autor:   María León Pérez
+// Resumen: Archivo de constantes globales de la aplicación. Actualmente vacío porque
+//          todos los datos estáticos (iconos disponibles, tipos de archivo) están
+//          colocalizados en los componentes que los usan. Se mantiene como punto
+//          de extensión para futuras constantes compartidas.

@@ -1,3 +1,7 @@
+// Autor:   María León Pérez
+// Resumen: Componente de logotipo de Voice Quizzer. Muestra un cuadrado naranja con la
+//          letra "V". Acepta className para redimensionarlo y onClick para usarlo como
+//          botón de navegación en el header.
 import React from 'react';
 
 interface LogoProps {

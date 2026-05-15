@@ -1,3 +1,8 @@
+// Autor:   María León Pérez
+// Resumen: Definición centralizada de todos los tipos TypeScript del dominio Voice Quizzer.
+//          Estos tipos se usan tanto en los componentes React como en las llamadas a DynamoDB,
+//          garantizando consistencia entre la estructura de datos de la base de datos y la UI.
+
 // ── Tipos del dominio Voice Quizzer ───────────────────────────────────────────
 
 export interface Asignatura {

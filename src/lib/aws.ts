@@ -1,5 +1,12 @@
-// ── Utilidades AWS compartidas (DynamoDB + S3) ─────────────────────────────────
-// Variables de entorno necesarias en .env:
+// Autor:   María León Pérez
+// Resumen: Capa de acceso a AWS desde el cliente React. Implementa AWS Signature V4
+//          manualmente usando la Web Crypto API (crypto.subtle) para firmar peticiones
+//          HTTP a DynamoDB y S3 sin necesidad del SDK de AWS (que es demasiado pesado
+//          para un bundle frontend). Expone: dynamo() para operaciones DynamoDB,
+//          s3Upload/s3Delete/s3PresignedUrl para gestión de archivos, y hashPassword()
+//          para hashing SHA-256 de contraseñas en el cliente.
+//
+// Variables de entorno requeridas en .env:
 //   VITE_AWS_REGION, VITE_AWS_ACCESS_KEY_ID, VITE_AWS_SECRET_ACCESS_KEY, VITE_AWS_BUCKET_NAME
 
 export const REGION = import.meta.env.VITE_AWS_REGION ?? 'eu-west-1';
@@ -31,6 +38,12 @@ export async function hashPassword(pwd: string): Promise<string> {
 }
 
 // ── DynamoDB (AWS Signature V4) ───────────────────────────────────────────────
+/**
+ * Envía una petición firmada con AWS Signature V4 al endpoint de DynamoDB.
+ * El 'target' es el nombre de la operación DynamoDB en formato
+ * 'DynamoDB_20120810.<Operacion>' (ej. GetItem, PutItem, Scan, UpdateItem, DeleteItem).
+ * La firma se recalcula en cada llamada porque incluye la fecha/hora exacta (amzDate).
+ */
 export async function dynamo(target: string, body: object): Promise<Response> {
   const payload = JSON.stringify(body);
   const now     = new Date();
@@ -62,8 +75,13 @@ export async function dynamo(target: string, body: object): Promise<Response> {
 }
 
 // ── S3 PutObject (AWS Signature V4) ──────────────────────────────────────────
-// IMPORTANTE: El bucket necesita CORS configurado para PUT desde el origen de la app.
-// Estructura: voice-quizzer-maria/{email}/{asignatura}/{unidad}/{filename}
+/**
+ * Sube un objeto a S3 directamente desde el navegador (upload directo al bucket).
+ * El bucket necesita CORS con AllowedMethods: ["GET","PUT","DELETE","HEAD"] y
+ * AllowedOrigins apuntando al dominio de la app.
+ * Cada segmento del key se codifica con encodeURIComponent preservando las barras '/'
+ * para que nombres con espacios o caracteres especiales funcionen correctamente.
+ */
 export async function s3Upload(
   key: string,
   body: Uint8Array | string,
@@ -159,7 +177,12 @@ export async function s3Delete(key: string): Promise<Response> {
 }
 
 // ── S3 GetObject presigned URL ────────────────────────────────────────────────
-// Genera una URL firmada para descargar/ver un objeto sin credenciales en el cliente.
+/**
+ * Genera una URL prefirmada para que el navegador descargue un objeto de S3 sin
+ * exponer las credenciales. Los parámetros de query deben estar en orden alfabético
+ * (requisito de AWS Signature V4 para presigned URLs). Se usa UNSIGNED-PAYLOAD porque
+ * el cuerpo de una GET es vacío y S3 presigned URLs no permiten firmado del payload.
+ */
 export async function s3PresignedUrl(key: string, expiresIn = 3600): Promise<string> {
   const now     = new Date();
   const amzDate = now.toISOString().replace(/[:-]|\.\d{3}/g, '').slice(0, 15) + 'Z';

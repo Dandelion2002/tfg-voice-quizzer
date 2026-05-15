@@ -1,3 +1,9 @@
+// Autor:   María León Pérez
+// Resumen: Pantalla de autenticación con doble modo: inicio de sesión y registro.
+//          El registro genera un PIN de 6 dígitos aleatorio que el usuario debe
+//          apuntar para vincular su dispositivo Alexa. Las contraseñas se hashean
+//          con SHA-256 en el cliente (hashPassword) antes de enviarse a DynamoDB:
+//          nunca viajan ni se almacenan en texto plano.
 import React, { useState } from 'react';
 import { motion } from 'motion/react';
 import { LogIn, UserPlus, ArrowRight } from 'lucide-react';
@@ -5,6 +11,10 @@ import Logo from './Logo';
 import { dynamo, hashPassword } from '../lib/aws';
 import { CurrentUser } from '../types';
 
+/**
+ * Autentica al usuario comparando el hash SHA-256 de la contraseña con el almacenado
+ * en DynamoDB. Devuelve el objeto CurrentUser si coincide, o un mensaje de error.
+ */
 async function iniciarSesion(email: string, password: string): Promise<{ user?: CurrentUser; error?: string }> {
   const res  = await dynamo('DynamoDB_20120810.GetItem', {
     TableName: 'VQ_Usuarios',
@@ -23,6 +33,11 @@ async function iniciarSesion(email: string, password: string): Promise<{ user?: 
   };
 }
 
+/**
+ * Crea una nueva cuenta en VQ_Usuarios con un PIN de 6 dígitos generado aleatoriamente.
+ * La condición 'attribute_not_exists(id_unidad)' equivalente se implementa verificando
+ * primero si el email ya existe (GetItem) antes del PutItem, evitando duplicados.
+ */
 async function registrarUsuario(
   nombre: string,
   email: string,
