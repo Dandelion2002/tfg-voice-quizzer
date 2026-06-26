@@ -7,16 +7,16 @@ import React from 'react';
 interface LogoProps {
   className?: string;
   onClick?: () => void;
+  src?: string;
 }
 
-export default function Logo({ className = "w-8 h-8", onClick }: LogoProps) {
+export default function Logo({ className = "w-8 h-8", onClick, src = "/logotipo.png" }: LogoProps) {
   return (
-    <div 
+    <img
+      src={src}
+      alt="VoiceQuizzer"
       onClick={onClick}
-      className={`bg-tepro-orange rounded-lg flex items-center justify-center cursor-pointer ${className}`}
-    >
-      {/* Placeholder for actual logo image */}
-      <span className="text-white font-bold text-xl">V</span>
-    </div>
+      className={`object-contain cursor-pointer ${className}`}
+    />
   );
 }

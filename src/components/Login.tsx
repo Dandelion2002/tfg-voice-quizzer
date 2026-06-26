@@ -4,12 +4,21 @@
 //          apuntar para vincular su dispositivo Alexa. Las contraseñas se hashean
 //          con SHA-256 en el cliente (hashPassword) antes de enviarse a DynamoDB:
 //          nunca viajan ni se almacenan en texto plano.
+//          La contraseña de registro debe cumplir: mínimo 8 caracteres, al menos
+//          una mayúscula y al menos un número (validado en cliente antes de enviar).
 import React, { useState } from 'react';
 import { motion } from 'motion/react';
-import { LogIn, UserPlus, ArrowRight } from 'lucide-react';
+import { LogIn, UserPlus, ArrowRight, Check, X } from 'lucide-react';
 import Logo from './Logo';
 import { dynamo, hashPassword } from '../lib/aws';
 import { CurrentUser } from '../types';
+
+/** Reglas de complejidad que debe cumplir la contraseña al registrarse. */
+const passwordRules = [
+  { id: 'length',    label: 'Mínimo 8 caracteres',  test: (p: string) => p.length >= 8 },
+  { id: 'uppercase', label: 'Al menos una mayúscula', test: (p: string) => /[A-Z]/.test(p) },
+  { id: 'number',    label: 'Al menos un número',    test: (p: string) => /[0-9]/.test(p) },
+];
 
 /**
  * Autentica al usuario comparando el hash SHA-256 de la contraseña con el almacenado
@@ -78,10 +87,23 @@ export default function Login({ onLogin }: LoginProps) {
   const [successMsg, setSuccessMsg]           = useState('');
   const [loading, setLoading]                 = useState(false);
 
+  const passwordValid = passwordRules.every(r => r.test(password));
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setError(''); setSuccessMsg('');
-    if (!isLogin && password !== confirmPassword) return setError('Las contraseñas no coinciden.');
+    setError('');
+    setSuccessMsg('');
+
+    if (!isLogin) {
+      if (!passwordRules.every(r => r.test(password))) {
+        setError('La contraseña no cumple los requisitos de seguridad.');
+        return;
+      }
+      if (password !== confirmPassword) {
+        setError('Las contraseñas no coinciden.');
+        return;
+      }
+    }
 
     setLoading(true);
     try {
@@ -109,10 +131,9 @@ export default function Login({ onLogin }: LoginProps) {
         animate={{ opacity: 1, y: 0 }}
         className="max-w-md w-full bg-white rounded-2xl shadow-xl p-8"
       >
-        <div className="flex flex-col items-center mb-8">
-          <Logo className="w-16 h-16 mb-4" />
-          <h1 className="text-2xl font-bold text-gray-900">Voice Quizzer</h1>
-          <p className="text-gray-500 mt-2">
+        <div className="flex flex-col items-center mb-4">
+          <Logo className="w-40 h-40 mb-1" />
+          <p className="text-gray-500 mt-1">
             {isLogin ? 'Inicia sesión para continuar' : 'Crea una cuenta para empezar'}
           </p>
         </div>
@@ -140,6 +161,21 @@ export default function Login({ onLogin }: LoginProps) {
             <input type="password" value={password} onChange={e => setPassword(e.target.value)}
               className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-tepro-orange focus:border-transparent outline-none transition-all"
               placeholder="••••••••" required />
+            {!isLogin && password.length > 0 && (
+              <ul className="mt-2 space-y-1">
+                {passwordRules.map(rule => {
+                  const ok = rule.test(password);
+                  return (
+                    <li key={rule.id} className={`flex items-center gap-1.5 text-xs font-medium transition-colors ${ok ? 'text-emerald-600' : 'text-red-500'}`}>
+                      {ok
+                        ? <Check className="w-3.5 h-3.5 shrink-0" />
+                        : <X    className="w-3.5 h-3.5 shrink-0" />}
+                      {rule.label}
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
           </div>
           {!isLogin && (
             <div>
@@ -156,7 +192,6 @@ export default function Login({ onLogin }: LoginProps) {
               ? <span className="animate-spin rounded-full h-5 w-5 border-2 border-white border-t-transparent" />
               : isLogin ? <LogIn className="w-5 h-5" /> : <UserPlus className="w-5 h-5" />}
             {loading ? 'Cargando...' : isLogin ? 'Iniciar Sesión' : 'Registrarse'}
-            {!loading && <ArrowRight className="w-5 h-5" />}
           </button>
         </form>
 

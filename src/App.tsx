@@ -4,7 +4,7 @@
 //          jerarquía de pantallas plana y predecible. Almacena el usuario actual,
 //          la asignatura seleccionada y la unidad seleccionada como estado compartido,
 //          pasándolo hacia abajo por props a cada pantalla.
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import Home from './components/Home';
 import GestionAsignatura from './components/GestionAsignatura';
 import GestionUnidad from './components/GestionUnidad';
@@ -23,11 +23,27 @@ type Screen =
   | 'history'
   | 'estadisticas';
 
+const SESSION_KEY = 'vq_session';
+
 export default function App() {
-  const [currentScreen, setCurrentScreen]           = useState<Screen>('login');
-  const [currentUser, setCurrentUser]               = useState<CurrentUser | null>(null);
+  const [currentScreen, setCurrentScreen]           = useState<Screen>(() => {
+    const saved = localStorage.getItem(SESSION_KEY);
+    return saved ? 'home' : 'login';
+  });
+  const [currentUser, setCurrentUser]               = useState<CurrentUser | null>(() => {
+    const saved = localStorage.getItem(SESSION_KEY);
+    return saved ? JSON.parse(saved) : null;
+  });
   const [selectedAsignatura, setSelectedAsignatura] = useState<Asignatura | null>(null);
   const [selectedUnidad, setSelectedUnidad]         = useState<Unidad | null>(null);
+
+  useEffect(() => {
+    if (currentUser) {
+      localStorage.setItem(SESSION_KEY, JSON.stringify(currentUser));
+    } else {
+      localStorage.removeItem(SESSION_KEY);
+    }
+  }, [currentUser]);
 
   const handleLogin = (user: CurrentUser) => {
     setCurrentUser(user);
@@ -43,6 +59,7 @@ export default function App() {
   const handleViewUser    = () => setCurrentScreen('user-profile');
 
   const handleLogout = () => {
+    localStorage.removeItem(SESSION_KEY);
     setCurrentUser(null);
     setSelectedAsignatura(null);
     setSelectedUnidad(null);
@@ -85,7 +102,6 @@ export default function App() {
         <Home
           email={currentUser.email}
           pin={currentUser.pin}
-          fotoKey={currentUser.foto}
           onSelectAsignatura={handleSelectAsignatura}
           onGoToHistory={handleGoToHistory}
           onViewUser={handleViewUser}

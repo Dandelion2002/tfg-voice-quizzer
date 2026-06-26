@@ -3,7 +3,7 @@ Autor:   María León Pérez
 Resumen: Handler principal de la Alexa Skill de Voice Quizzer, desplegado como función AWS Lambda.
          Implementa una máquina de estados conversacional que gestiona la vinculación de cuenta
          por PIN, la selección de asignatura/unidad, el modo 'repasar' (resumen generado por
-         Claude 3 Haiku recitado en segmentos) y el modo 'test' (cuestionario tipo test con
+         Claude Haiku 4.5 recitado en segmentos) y el modo 'test' (cuestionario tipo test con
          evaluación automática). Persiste el historial en DynamoDB y los resúmenes en VQ_Unidad.
          No requiere dependencias externas: usa únicamente boto3 (built-in en el runtime Lambda).
 
@@ -81,12 +81,12 @@ def _extraer_json(texto, array=True):
     return texto.strip()
 
 
-# ── Bedrock (Claude 3 Haiku) ──────────────────────────────────────────────────
+# ── Bedrock (Claude Haiku 4.5) ────────────────────────────────────────────────
 
 def _llm(messages, temperature=0.4, max_tokens=4000):
-    """Invoca Claude 3 Haiku en AWS Bedrock mediante la API Converse.
+    """Invoca Claude Haiku 4.5 en AWS Bedrock mediante la API Converse.
 
-    Se usa la región eu-west-1 (única que expone Claude 3 Haiku en Bedrock Europa).
+    Se usa la región eu-west-1 (región donde está desplegada la función Lambda).
     El parámetro 'system' se separa de los mensajes de conversación porque la API
     Converse lo requiere como campo de nivel superior, no como mensaje con role='system'.
     La temperatura baja (0.3–0.4) es deliberada: queremos respuestas consistentes y
@@ -110,7 +110,7 @@ def _llm(messages, temperature=0.4, max_tokens=4000):
         conv_messages = [{'role': 'user', 'content': [{'text': 'Hola'}]}]
 
     kwargs = {
-        'modelId':         'anthropic.claude-3-haiku-20240307-v1:0',
+        'modelId':         'eu.anthropic.claude-haiku-4-5-20251001-v1:0',
         'messages':        conv_messages,
         'inferenceConfig': {
             'maxTokens':   max_tokens,
@@ -627,7 +627,7 @@ def _limpiar_intro(texto):
 
 
 def _generar_repaso(attrs):
-    """Genera un resumen del 35% del temario con Claude 3 Haiku y lo recita en segmentos.
+    """Genera un resumen del 35% del temario con Claude Haiku 4.5 y lo recita en segmentos.
     Los chunks.json de la unidad se cachean en el diccionario _chunks_cache (persiste
     entre invocaciones calientes de la misma Lambda) para evitar descargas repetidas de S3.
     Si el resumen cabe en un único segmento, se guarda y pasa directamente a
@@ -801,7 +801,7 @@ def _guardar_resumen(email, asignatura, unidad, resumen):
 # ── Lógica del cuestionario (solo test) ──────────────────────────────────────
 
 def _generar_cuestionario(attrs):
-    """Genera el cuestionario tipo test usando RAG + Claude 3 Haiku.
+    """Genera el cuestionario tipo test usando RAG + Claude Haiku 4.5.
     El prompt fuerza al modelo a responder SOLO con un array JSON válido (sin markdown
     ni texto extra) porque _extraer_json necesita encontrar los objetos del array.
     Si el modelo devuelve menos preguntas de las solicitadas, se repiten hasta completar n
@@ -852,6 +852,17 @@ def _generar_cuestionario(attrs):
     if len(preguntas) < n:
         preguntas = (preguntas * (n // len(preguntas) + 1))[:n]
     preguntas = preguntas[:n]
+
+    # Mezclar las opciones de cada pregunta aleatoriamente para evitar
+    # que la respuesta correcta siempre caiga en la misma posición
+    import random
+    letras = ['A', 'B', 'C']
+    for p in preguntas:
+        correcta_texto = p['opciones'][p['correcta'].upper()]
+        valores = [p['opciones']['A'], p['opciones']['B'], p['opciones']['C']]
+        random.shuffle(valores)
+        p['opciones'] = {'A': valores[0], 'B': valores[1], 'C': valores[2]}
+        p['correcta'] = letras[valores.index(correcta_texto)]
 
     attrs.update({
         'estado':          'en_cuestionario',

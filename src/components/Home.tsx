@@ -14,7 +14,6 @@ import Logo from './Logo';
 interface HomeProps {
   email: string;
   pin: string;
-  fotoKey?: string;
   onSelectAsignatura: (asignatura: Asignatura) => void;
   onGoToHistory: () => void;
   onViewUser: () => void;
@@ -148,7 +147,7 @@ export default function Home({ email, pin, onSelectAsignatura, onGoToHistory, on
       {/* Header */}
       <header className="flex items-center justify-between px-8 py-4 border-b border-gray-100">
         <div className="flex items-center gap-3">
-          <Logo className="w-10 h-10" />
+          <Logo className="w-10 h-10" src="/logo_icon.png" />
           <span className="font-bold text-xl tracking-tight text-tepro-orange">Voice Quizzer</span>
         </div>
         <div className="flex items-center gap-4">

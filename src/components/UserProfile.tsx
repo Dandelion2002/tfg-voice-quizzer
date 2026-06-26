@@ -8,7 +8,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import {
   ChevronLeft, User, Mail, Shield, Calendar, Edit2, Lock, Save, X,
-  Trash2, AlertTriangle, Loader2, Camera,
+  Trash2, AlertTriangle, Loader2, Camera, Unlink, Link,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { dynamo, hashPassword, s3Upload, s3Delete, s3PresignedUrl } from '../lib/aws';
@@ -36,6 +36,7 @@ async function cargarUsuario(email: string) {
       pin:           data.Item.pin_vinculacion?.S ?? '—',
       fechaCreacion: data.Item.fecha_creacion?.S?.slice(0, 10) ?? '—',
       fotoKey:       data.Item.foto?.S ?? '',
+      alexaUserId:   data.Item.alexa_user_id?.S ?? 'PENDIENTE',
     },
   };
 }
@@ -77,6 +78,20 @@ async function eliminarCuenta(email: string) {
   return res.ok ? {} : { error: 'Error eliminando la cuenta.' };
 }
 
+async function desvinculaAlexa(email: string) {
+  const nuevoPin = String(Math.floor(100000 + Math.random() * 900000));
+  const res = await dynamo('DynamoDB_20120810.UpdateItem', {
+    TableName: 'VQ_Usuarios',
+    Key: { email: { S: email } },
+    UpdateExpression: 'SET alexa_user_id = :p, pin_vinculacion = :pin',
+    ExpressionAttributeValues: {
+      ':p':   { S: 'PENDIENTE' },
+      ':pin': { S: nuevoPin },
+    },
+  });
+  return res.ok ? { nuevoPin } : { error: 'Error desvinculando Alexa.' };
+}
+
 async function actualizarFoto(email: string, fotoKey: string | null) {
   if (fotoKey) {
     await dynamo('DynamoDB_20120810.UpdateItem', {
@@ -97,7 +112,7 @@ async function actualizarFoto(email: string, fotoKey: string | null) {
 // ── Componente ────────────────────────────────────────────────────────────────
 
 export default function UserProfile({ email, onBack, onDeleted, onPhotoUpdated }: UserProfileProps) {
-  const [user, setUser]             = useState({ nombre: '', email, pin: '—', fechaCreacion: '—', fotoKey: '' });
+  const [user, setUser]             = useState({ nombre: '', email, pin: '—', fechaCreacion: '—', fotoKey: '', alexaUserId: 'PENDIENTE' });
   const [loadingUser, setLoadingUser] = useState(true);
   const [globalError, setGlobalError] = useState('');
   const [fotoUrl, setFotoUrl]         = useState<string | null>(null);
@@ -113,8 +128,10 @@ export default function UserProfile({ email, onBack, onDeleted, onPhotoUpdated }
   const [passwordError, setPasswordError] = useState('');
   const [savingPassword, setSavingPassword] = useState(false);
 
-  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
-  const [deleting, setDeleting]                   = useState(false);
+  const [showDeleteConfirm, setShowDeleteConfirm]   = useState(false);
+  const [deleting, setDeleting]                     = useState(false);
+  const [showUnlinkConfirm, setShowUnlinkConfirm]   = useState(false);
+  const [unlinking, setUnlinking]                   = useState(false);
 
   useEffect(() => {
     cargarUsuario(email).then(async res => {
@@ -151,6 +168,17 @@ export default function UserProfile({ email, onBack, onDeleted, onPhotoUpdated }
     if (res.error) { setPasswordError(res.error); }
     else { setIsChangingPassword(false); setPasswords({ old: '', new: '', confirm: '' }); }
     setSavingPassword(false);
+  };
+
+  const handleUnlinkAlexa = async () => {
+    setUnlinking(true);
+    const res = await desvinculaAlexa(email);
+    if (res.error) { setGlobalError(res.error); }
+    else {
+      setUser(u => ({ ...u, alexaUserId: 'PENDIENTE', pin: res.nuevoPin! }));
+      setShowUnlinkConfirm(false);
+    }
+    setUnlinking(false);
   };
 
   const handleDeleteAccount = async () => {
@@ -242,8 +270,30 @@ export default function UserProfile({ email, onBack, onDeleted, onPhotoUpdated }
                 )}
                 <p className="text-gray-500 font-medium">Estudiante</p>
               </div>
-              <div className="px-4 py-2 bg-orange-50 text-tepro-orange rounded-xl text-sm font-bold border border-orange-100">
-                PIN Alexa: {user.pin}
+              <div className="flex flex-col items-end gap-2">
+                <div className="px-4 py-2 bg-orange-50 text-tepro-orange rounded-xl text-sm font-bold border border-orange-100">
+                  PIN Alexa: {user.pin}
+                </div>
+                {user.alexaUserId && user.alexaUserId !== 'PENDIENTE' ? (
+                  <div className="flex items-center gap-2">
+                    <span className="flex items-center gap-1.5 text-xs font-medium text-emerald-600 bg-emerald-50 border border-emerald-100 px-3 py-1 rounded-lg">
+                      <Link className="w-3 h-3" />
+                      Alexa vinculada
+                    </span>
+                    <button
+                      onClick={() => setShowUnlinkConfirm(true)}
+                      className="flex items-center gap-1.5 text-xs font-medium text-gray-500 hover:text-red-600 border border-gray-200 hover:border-red-200 hover:bg-red-50 px-3 py-1 rounded-lg transition-all"
+                    >
+                      <Unlink className="w-3 h-3" />
+                      Desvincular
+                    </button>
+                  </div>
+                ) : (
+                  <span className="flex items-center gap-1.5 text-xs font-medium text-amber-600 bg-amber-50 border border-amber-100 px-3 py-1 rounded-lg">
+                    <Unlink className="w-3 h-3" />
+                    Sin vincular
+                  </span>
+                )}
               </div>
             </div>
 
@@ -352,6 +402,48 @@ export default function UserProfile({ email, onBack, onDeleted, onPhotoUpdated }
           </div>
         </motion.div>
       </main>
+
+      {/* Modal confirmación desvincular Alexa */}
+      <AnimatePresence>
+        {showUnlinkConfirm && (
+          <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-[100] p-6">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="bg-white rounded-3xl shadow-2xl max-w-md w-full p-8"
+            >
+              <div className="w-16 h-16 bg-amber-50 rounded-2xl flex items-center justify-center mb-6">
+                <Unlink className="w-8 h-8 text-amber-500" />
+              </div>
+              <h3 className="text-2xl font-bold text-gray-900 mb-2">¿Desvincular Alexa?</h3>
+              <p className="text-gray-500 text-sm mb-2 leading-relaxed">
+                Tu dispositivo Alexa quedará desvinculado y tu código de vinculación se actualizará automáticamente por seguridad.
+              </p>
+              <p className="text-amber-600 text-xs font-medium mb-8">
+                Alexa dejará de reconocerte hasta que vuelvas a vincular con el nuevo código.
+              </p>
+              <div className="flex gap-3">
+                <button
+                  onClick={() => setShowUnlinkConfirm(false)}
+                  disabled={unlinking}
+                  className="flex-1 py-3 bg-gray-50 text-gray-600 rounded-xl font-bold hover:bg-gray-100 transition-all disabled:opacity-50"
+                >
+                  Cancelar
+                </button>
+                <button
+                  onClick={handleUnlinkAlexa}
+                  disabled={unlinking}
+                  className="flex-1 py-3 bg-amber-500 text-white rounded-xl font-bold hover:bg-amber-600 transition-all shadow-md disabled:opacity-60 flex items-center justify-center gap-2"
+                >
+                  {unlinking && <Loader2 className="w-4 h-4 animate-spin" />}
+                  {unlinking ? 'Desvinculando...' : 'Desvincular'}
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
 
       {/* Modal confirmación borrado */}
       <AnimatePresence>

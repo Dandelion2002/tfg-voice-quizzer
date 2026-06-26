@@ -21,7 +21,11 @@ interface EstadisticasProps {
 
 interface DataPoint {
   date: string;
+  fullLabel: string;
   percentage: number;
+  tipo: string;
+  aciertos: number;
+  total: number;
 }
 
 /**

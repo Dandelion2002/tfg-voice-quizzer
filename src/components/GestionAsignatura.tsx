@@ -141,6 +141,8 @@ export default function GestionAsignatura({
   const [saveError, setSaveError]               = useState('');
   const [showDeleteAsig, setShowDeleteAsig]     = useState(false);
   const [deletingAsig, setDeletingAsig]         = useState(false);
+  const [unidadToDelete, setUnidadToDelete]     = useState<Unidad | null>(null);
+  const [deletingUnidad, setDeletingUnidad]     = useState(false);
   const [resumenModal, setResumenModal]         = useState<Unidad | null>(null);
 
   const loadUnidades = () => {
@@ -193,13 +195,18 @@ export default function GestionAsignatura({
     }
   };
 
-  const handleDeleteUnidad = async (unidad: Unidad) => {
-    if (!window.confirm(`¿Eliminar la unidad "${unidad.nombre_unidad}"? Esta acción no se puede revertir.`)) return;
+  const handleDeleteUnidad = async () => {
+    if (!unidadToDelete) return;
+    setDeletingUnidad(true);
     try {
-      await deleteUnidad(unidad);
-      setUnidades(prev => prev.filter(u => u.detalle_archivo !== unidad.detalle_archivo));
+      await deleteUnidad(unidadToDelete);
+      setUnidades(prev => prev.filter(u => u.detalle_archivo !== unidadToDelete.detalle_archivo));
+      setUnidadToDelete(null);
     } catch {
-      alert('Error eliminando la unidad.');
+      setSaveError('Error eliminando la unidad.');
+      setUnidadToDelete(null);
+    } finally {
+      setDeletingUnidad(false);
     }
   };
 
@@ -485,7 +492,7 @@ export default function GestionAsignatura({
                             <Edit3 className="w-4 h-4" />
                           </button>
                           <button
-                            onClick={() => handleDeleteUnidad(unidad)}
+                            onClick={() => setUnidadToDelete(unidad)}
                             className="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-all"
                             title="Eliminar"
                           >
@@ -548,6 +555,48 @@ export default function GestionAsignatura({
                 >
                   <FileDown className="w-4 h-4" />
                   Exportar a PDF
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Modal confirmación borrar unidad */}
+      <AnimatePresence>
+        {unidadToDelete && (
+          <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-[100] p-6">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="bg-white rounded-3xl shadow-2xl max-w-md w-full p-8"
+            >
+              <div className="w-16 h-16 bg-red-50 rounded-2xl flex items-center justify-center mb-6">
+                <AlertTriangle className="w-8 h-8 text-red-600" />
+              </div>
+              <h3 className="text-2xl font-bold text-gray-900 mb-2">¿Eliminar unidad?</h3>
+              <p className="text-gray-500 text-sm mb-2 leading-relaxed">
+                Vas a eliminar <span className="font-bold text-gray-800">{unidadToDelete.nombre_unidad}</span> y su archivo en S3.
+              </p>
+              <p className="text-red-500 text-xs font-medium mb-8">
+                Esta acción no se puede revertir.
+              </p>
+              <div className="flex gap-3">
+                <button
+                  onClick={() => setUnidadToDelete(null)}
+                  disabled={deletingUnidad}
+                  className="flex-1 py-3 bg-gray-50 text-gray-600 rounded-xl font-bold hover:bg-gray-100 transition-all disabled:opacity-50"
+                >
+                  Cancelar
+                </button>
+                <button
+                  onClick={handleDeleteUnidad}
+                  disabled={deletingUnidad}
+                  className="flex-1 py-3 bg-red-600 text-white rounded-xl font-bold hover:bg-red-700 transition-all shadow-md disabled:opacity-60 flex items-center justify-center gap-2"
+                >
+                  {deletingUnidad && <Loader2 className="w-4 h-4 animate-spin" />}
+                  {deletingUnidad ? 'Eliminando...' : 'Eliminar'}
                 </button>
               </div>
             </motion.div>

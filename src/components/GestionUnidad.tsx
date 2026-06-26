@@ -80,9 +80,10 @@ export default function GestionUnidad({ email, nombreAsignatura, unidad, onBack 
   const [urlInput, setUrlInput]       = useState(
     unidad?.tipo_archivo === 'URL' ? unidad.nombre_archivo : ''
   );
-  const [isSaving, setIsSaving]       = useState(false);
+  const [isSaving, setIsSaving]         = useState(false);
   const [saveProgress, setSaveProgress] = useState(0);
-  const [error, setError]             = useState('');
+  const [error, setError]               = useState('');
+  const [flaskWarning, setFlaskWarning] = useState(false);
 
   const fileInputRef = React.useRef<HTMLInputElement>(null);
 
@@ -209,6 +210,7 @@ export default function GestionUnidad({ email, nombreAsignatura, unidad, onBack 
       // 3. Llamar al backend Flask para generar el índice FAISS
       //    (esto puede tardar 15-30 seg según el tamaño del documento)
       const hayArchivoNuevo = tipoArchivo === 'URL' || selectedFile !== null;
+      let flaskFailed = false;
       if (hayArchivoNuevo) {
         setSaveProgress(75);
         try {
@@ -226,17 +228,21 @@ export default function GestionUnidad({ email, nombreAsignatura, unidad, onBack 
           if (!ragRes.ok) {
             const ragBody = await ragRes.json().catch(() => ({}));
             console.warn('RAG backend error:', ragBody);
-            // No bloqueamos: el archivo ya está guardado, solo el índice falla
+            flaskFailed = true;
+            setFlaskWarning(true);
           }
         } catch (ragErr) {
           // Flask no disponible — el archivo queda en estado "pendiente"
           console.warn('Backend Flask no disponible. El índice RAG se generará más tarde:', ragErr);
+          flaskFailed = true;
+          setFlaskWarning(true);
         }
       }
 
       setSaveProgress(100);
       await new Promise(r => setTimeout(r, 400));
-      onBack();
+      // Si Flask falló mostramos el aviso en pantalla; el usuario vuelve manualmente
+      if (!flaskFailed) onBack();
     } catch (err) {
       console.error(err);
       setError('Error guardando la unidad. Comprueba la consola.');
@@ -277,6 +283,27 @@ export default function GestionUnidad({ email, nombreAsignatura, unidad, onBack 
         {error && (
           <div className="mb-6 p-4 bg-red-50 text-red-600 text-sm font-medium rounded-xl border border-red-100">
             {error}
+          </div>
+        )}
+
+        {flaskWarning && (
+          <div className="mb-6 p-4 bg-amber-50 border border-amber-200 rounded-xl flex items-start gap-3">
+            <span className="text-amber-500 text-xl leading-none mt-0.5">⚠️</span>
+            <div className="flex-1">
+              <p className="text-sm font-bold text-amber-800 mb-1">Unidad guardada — índice RAG pendiente</p>
+              <p className="text-xs text-amber-700">
+                El archivo se subió correctamente a S3 y los metadatos se guardaron en DynamoDB,
+                pero el servidor Flask no está disponible en este momento. La unidad aparece como
+                <strong> "pendiente"</strong>. Cuando arranques Flask ({API_URL}), el índice RAG
+                se generará automáticamente en el próximo intento.
+              </p>
+              <button
+                onClick={onBack}
+                className="mt-3 px-4 py-1.5 bg-amber-500 hover:bg-amber-600 text-white text-xs font-bold rounded-lg transition-colors"
+              >
+                Entendido, volver al listado
+              </button>
+            </div>
           </div>
         )}
 
